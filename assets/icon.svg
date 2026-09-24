@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- App icon. Source for assets/icon.png (regenerate: scripts/render-icon.sh).
+       Follows the macOS grid: an 824px tile centred on a 1024px canvas. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A3A3A"/>
+      <stop offset="1" stop-color="#1E1E1E"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4DB5FF"/>
+      <stop offset="1" stop-color="#0D99FF"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E6E6E6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- Query text: three lines of "SQL". -->
+  <g fill="#8C8C8C">
+    <rect x="232" y="236" width="170" height="36" rx="18" fill="#FF7B72"/>
+    <rect x="422" y="236" width="250" height="36" rx="18"/>
+    <rect x="232" y="300" width="120" height="36" rx="18" fill="#FF7B72"/>
+    <rect x="372" y="300" width="190" height="36" rx="18"/>
+  </g>
+
+  <!-- Result: rising bars. -->
+  <g fill="url(#bar)">
+    <rect x="232" y="620" width="96" height="172" rx="22"/>
+    <rect x="360" y="530" width="96" height="262" rx="22"/>
+    <rect x="488" y="430" width="96" height="362" rx="22"/>
+  </g>
+
+  <!-- Execute badge. -->
+  <g filter="url(#shadow)">
+    <circle cx="702" cy="660" r="118" fill="url(#badge)"/>
+  </g>
+  <path d="M672 596 L672 724 L776 660 Z" fill="#0D99FF" stroke="#0D99FF" stroke-width="18" stroke-linejoin="round"/>
+</svg>

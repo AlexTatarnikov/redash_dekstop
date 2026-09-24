@@ -31,6 +31,17 @@ for target in "${TARGETS[@]}"; do SLICES+=("target/$target/release/$BIN"); done
 lipo -create -output "$APP/Contents/MacOS/$BIN" "${SLICES[@]}"
 cp assets/fonts/Inter-LICENSE.txt "$APP/Contents/Resources/"
 
+# Redash.icns from the committed 1024px PNG (scripts/render-icon.sh renders it from the SVG).
+ICONSET="$DIST/$APP_NAME.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" assets/icon.png --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  double=$((size * 2))
+  sips -z "$double" "$double" assets/icon.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/$APP_NAME.icns"
+rm -rf "$ICONSET"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,6 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>$APP_NAME</string>
   <key>CFBundleDisplayName</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleIconFile</key><string>$APP_NAME</string>
   <key>CFBundleExecutable</key><string>$BIN</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>

@@ -12,13 +12,15 @@ fn main() -> anyhow::Result<()> {
         (ConfigStore::default_file()?, None)
     };
 
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Redash")
-            .with_inner_size([1100.0, 750.0])
-            .with_min_inner_size([600.0, 400.0]),
-        ..Default::default()
-    };
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Redash")
+        .with_inner_size([1100.0, 750.0])
+        .with_min_inner_size([600.0, 400.0]);
+    // The window/Dock icon when run unbundled (`cargo run`); the .app uses Redash.icns.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("Redash", options, Box::new(|_cc| Ok(Box::new(RedashApp::new(store)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
