@@ -11,6 +11,8 @@ use eframe::egui::{
     TextStyle, Theme, Vec2,
 };
 
+use crate::sql::Token;
+
 pub const ACCENT: Color32 = Color32::from_rgb(0x0D, 0x99, 0xFF);
 const RADIUS: u8 = 5;
 const SEMIBOLD: &str = "Inter-SemiBold";
@@ -71,9 +73,32 @@ pub fn primary_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).color(Color32::WHITE)).fill(ACCENT)
 }
 
+/// SQL syntax colour, from GitHub's code view palette (Primer "prettylights").
+pub fn syntax_color(token: Token, dark: bool) -> Color32 {
+    let rgb = |hex: u32| Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+    let (light, dark_hex) = match token {
+        Token::Plain => return if dark { DARK.text } else { LIGHT.text },
+        Token::Keyword => (0xCF222E, 0xFF7B72),
+        Token::Function => (0x8250DF, 0xD2A8FF),
+        Token::Constant => (0x0550AE, 0x79C0FF),
+        Token::String => (0x0A3069, 0xA5D6FF),
+        Token::Comment => (0x6E7781, 0x8B949E),
+        Token::Parameter => (0x953800, 0xFFA657),
+    };
+    rgb(if dark { dark_hex } else { light })
+}
+
+/// Space between the SQL editor's box and its text.
+pub const EDITOR_PADDING: Margin = Margin::symmetric(8, 6);
+
 /// Frame for toolbars and status bars.
 pub fn bar_frame(style: &egui::Style) -> egui::Frame {
     egui::Frame::side_top_panel(style).inner_margin(Margin::symmetric(12, 8))
+}
+
+/// Frame for popups anchored in the editor, like autocompletion.
+pub fn popup_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::popup(style).inner_margin(Margin::same(4))
 }
 
 fn fonts() -> FontDefinitions {

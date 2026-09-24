@@ -36,6 +36,9 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/app.rs` | Runtime (`RedashApp`). Performs effects (HTTP on background threads, settings I/O), feeds results back as events. |
 | `src/ui/*.rs` | Drawing only, one file per screen (`setup`, `editor`, `results`). Returns the `Event` the user triggered. |
 | `src/ui/theme.rs` | The visual theme, modelled on Figma's desktop UI (UI3): Inter font, palette, sizes, and helpers like `primary_button`. Light and dark follow the OS. |
+| `src/sql.rs` | Pure SQL tokenizer for editor highlighting; colours (GitHub's palette) are `theme::syntax_color`. |
+| `src/complete.rs` | Pure SQL autocompletion: suggestions at the cursor from the schema (aliases, `schema.`, `FROM` context). |
+| `src/ui/completion.rs` | The editor's autocomplete popup: when it opens, its keys (↑/↓, Enter/Tab, Esc, Ctrl+Space), drawing. |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
 | `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests). |
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour. |
@@ -53,6 +56,9 @@ flow in `tests/ui.rs`.
 - `POST /api/query_results {data_source_id, query, max_age: 0, parameters: {}}` returns
   either `{query_result}` or `{job}`; poll `GET /api/jobs/{id}` (status 3 = success,
   4 = failure, 5 = cancelled), then `GET /api/query_results/{query_result_id}`.
+- `GET /api/data_sources/{id}/schema` returns `{schema: [{name, columns}]}` from cache, or
+  `{job}` whose finished `result` is that list; `{error: {code: 1}}` means the source
+  can't list its schema (treated as empty). Columns are bare names or `{name, type}`.
 
 ## Gotchas
 
@@ -69,7 +75,8 @@ flow in `tests/ui.rs`.
   Fonts are embedded from `assets/fonts/` (Inter, SIL Open Font License; keep `Inter-LICENSE.txt`).
   Check both `editor_results.png` (dark) and `editor_results_light.png` after visual changes.
 - Widgets must be findable by tests: give text inputs an accessible label with
-  `.labelled_by(label.id)`; buttons are found by their text.
+  `.labelled_by(label.id)`; buttons are found by their text. A `ComboBox` exposes its
+  selected text as its *value*, not its label: `h.get_by(|n| n.value().as_deref() == Some("…"))`.
 - Snapshots must be deterministic: `tests/ui.rs::snapshot` hides the cursor and masks the
   mock's random `http://127.0.0.1:<port>`. Mask anything else that varies per run.
 - Never touch the real settings file in tests; use `ConfigStore::memory`.

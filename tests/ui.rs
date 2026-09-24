@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use redash_desktop::RedashApp;
 use redash_desktop::config::{Config, ConfigStore};
 use redash_desktop::mock::{MOCK_API_KEY, MockRedash};
@@ -59,6 +59,14 @@ fn sources_loaded(h: &Harness<'_, RedashApp>) -> bool {
     matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.data_sources.is_empty())
 }
 
+/// Exercises every highlight colour in the editor snapshots.
+const SAMPLE_SQL: &str = "-- Paying users\nSELECT id, email, plan, count(*) AS n, 'pro' AS tier\nFROM users\nWHERE mrr > 0 AND signed_up >= '{{ start }}' AND deleted IS NULL\nLIMIT {{ limit }}";
+
+fn set_sql(h: &mut Harness<'_, RedashApp>, sql: &str) {
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.sql = sql.into();
+}
+
 fn type_into(h: &mut Harness<'_, RedashApp>, label: &str, text: &str) {
     h.get_by_label(label).click();
     h.run_steps(2);
@@ -77,6 +85,7 @@ fn connect_run_query_and_disconnect() {
     h.get_by_label("Connect").click();
     wait_for(&mut h, "editor", sources_loaded);
 
+    set_sql(&mut h, SAMPLE_SQL);
     h.get_by_label("▶ Execute").click();
     wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
     h.get_by_label("user1@example.com");
@@ -118,7 +127,122 @@ fn light_theme() {
     let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
     h.ctx.set_theme(egui::Theme::Light);
     wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
     h.get_by_label("▶ Execute").click();
     wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
     snapshot(&mut h, "editor_results_light");
+}
+
+#[test]
+fn pages_through_results() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("1–25 of 40").is_some());
+    assert!(h.query_by_label("user26@example.com").is_none(), "row 26 is on page 2");
+
+    h.get_by_label("›").click();
+    wait_for(&mut h, "page 2", |h| h.query_by_label_contains("26–40 of 40").is_some());
+    h.get_by_label("user26@example.com");
+    assert!(h.query_by_label("user25@example.com").is_none());
+
+    h.get_by_label("«").click();
+    wait_for(&mut h, "page 1", |h| h.query_by_label_contains("1–25 of 40").is_some());
+
+    h.get_by(|n| n.value().as_deref() == Some("25 / page")).click();
+    h.run_steps(2);
+    h.get_by_label("50 / page").click();
+    wait_for(&mut h, "one page", |h| h.query_by_label_contains("1–40 of 40").is_some());
+}
+
+#[test]
+fn cmd_slash_toggles_sql_comment() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    let sql = |h: &Harness<'_, RedashApp>| match &h.state().state().screen {
+        Screen::Editor(ed) => ed.sql.clone(),
+        Screen::Setup(_) => panic!("expected editor"),
+    };
+
+    h.query_all_by(|n| n.value().as_deref() == Some("SELECT 1")).next().unwrap().click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Slash);
+    h.run_steps(2);
+    assert_eq!(sql(&h), "-- SELECT 1");
+
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Slash);
+    h.run_steps(2);
+    assert_eq!(sql(&h), "SELECT 1");
+}
+
+#[test]
+fn commented_out_sql_cannot_run() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.sql = "-- SELECT 1".into();
+    h.run_steps(2);
+    assert!(h.get_by_label("▶ Execute").accesskit_node().is_disabled());
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run_steps(2);
+    assert!(!mock.requests().iter().any(|r| r.contains("POST /api/query_results")));
+}
+
+#[test]
+fn autocompletes_tables_and_columns() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(
+        &mut h,
+        "schema",
+        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty()),
+    );
+    let sql = |h: &Harness<'_, RedashApp>| match &h.state().state().screen {
+        Screen::Editor(ed) => ed.sql.clone(),
+        Screen::Setup(_) => panic!("expected editor"),
+    };
+    let type_text = |h: &mut Harness<'_, RedashApp>, text: &str| {
+        let current = sql(h);
+        h.query_all_by(|n| n.value().as_deref() == Some(current.as_str())).next().unwrap().type_text(text);
+        h.run_steps(2);
+    };
+
+    // Clicking below the text puts the cursor at the end.
+    h.query_all_by(|n| n.value().as_deref() == Some("SELECT 1")).next().unwrap().click();
+    h.run_steps(2);
+    type_text(&mut h, " FROM us");
+    h.get_by_label("users");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(sql(&h), "SELECT 1 FROM users");
+    assert!(h.query_by_label("users").is_none(), "closed after accepting");
+
+    type_text(&mut h, " u WHERE u.em");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(2);
+    assert_eq!(sql(&h), "SELECT 1 FROM users u WHERE u.email");
+
+    type_text(&mut h, " > '' AND u.");
+    h.get_by_label("mrr");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.query_by_label("mrr").is_none(), "Esc closes");
+
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Space);
+    h.run_steps(2);
+    snapshot(&mut h, "editor_autocomplete");
+    h.key_press(egui::Key::ArrowDown);
+    h.key_press(egui::Key::ArrowDown);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(sql(&h), "SELECT 1 FROM users u WHERE u.email > '' AND u.plan");
 }

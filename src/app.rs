@@ -71,6 +71,10 @@ impl RedashApp {
                     Client::new(&config).execute(data_source_id, &sql).map_err(|e| e.to_string()),
                 )
             }),
+            Effect::LoadSchema { config, data_source_id } => self.spawn(ctx, move || Event::SchemaLoaded {
+                data_source_id,
+                result: Client::new(&config).schema(data_source_id).map_err(|e| e.to_string()),
+            }),
             Effect::SaveConfig(config) => {
                 if let Err(e) = self.store.save(&config) {
                     self.dispatch(ctx, Event::ConfigError(format!("Could not save settings: {e}")));

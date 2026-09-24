@@ -1,6 +1,7 @@
 //! Drawing only: each screen renders its state and returns the [`Event`] the
 //! user triggered, if any. Logic lives in `state.rs`.
 
+mod completion;
 mod editor;
 mod results;
 mod setup;
