@@ -39,7 +39,9 @@ fn search(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<Even
             .margin(egui::Margin::symmetric(8, 4))
             .vertical_align(egui::Align::Center)
             .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
-            .desired_width(240.0)
+            // Narrower in a narrow panel, leaving room for the match count: a row wider than
+            // the panel would widen the table's scroll area past it, so it couldn't scroll sideways.
+            .desired_width((ui.available_width() - 200.0).max(ui.available_width() / 2.0).min(240.0))
             // Keep the focus on Enter, which selects the next match.
             .return_key(None);
         let tip = "Enter: next match · Shift + Enter: previous · Esc: clear";
@@ -57,10 +59,11 @@ fn search(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<Even
 
         if !view.search.trim().is_empty() {
             let rows = format!("{} of {} rows", view.found.rows.len(), view.page_rows(page_size).len());
-            ui.weak(match hits {
+            let status = match hits {
                 0 => "No matches".to_string(),
                 n => format!("{} of {n} matches · {rows}", view.current + 1),
-            });
+            };
+            ui.add(egui::Label::new(egui::RichText::new(status).weak()).truncate());
         }
     });
     ui.add_space(theme::CELL_PADDING);
@@ -113,6 +116,9 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
 
     egui::ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
         let area = ui.clip_rect();
+        // Where the selected match was drawn, to scroll to after the table: the table's
+        // own (vertical) scroll area would swallow a horizontal scroll requested inside it.
+        let mut reveal = None;
         let mut table = TableBuilder::new(ui)
             .id_salt(("results", view.id))
             .striped(true)
@@ -174,13 +180,16 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
                                 if selected
                                     && ui.data_mut(|d| d.remove_temp::<bool>(reveal_id)).unwrap_or(false)
                                 {
-                                    label.scroll_to_me(None);
+                                    reveal = Some(label.rect);
                                 }
                             });
                         });
                     }
                 });
             });
+        if let Some(rect) = reveal {
+            ui.scroll_to_rect(rect, None);
+        }
     });
 }
 

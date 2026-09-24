@@ -585,3 +585,32 @@ fn schema_panel_lists_tables_and_filters_columns() {
     wait_for(&mut h, "events schema", |h| h.query_by_label("Tables in Events").is_some());
     wait_for(&mut h, "events table", |h| h.query_by_label("1 table").is_some());
 }
+
+#[test]
+fn search_scrolls_the_selected_match_into_view() {
+    let mock = MockRedash::start().unwrap();
+    // Narrow enough that the table scrolls sideways: `mrr`, the last column, starts out of view.
+    let mut h = Harness::builder()
+        .with_size([850.0, 750.0])
+        .wgpu()
+        .build_ui_state(|ui, app: &mut RedashApp| app.show(ui), RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+    h.get_by(|n| n.value().as_deref() == Some("25 / page")).click();
+    h.run_steps(2);
+    h.get_by_label("50 / page").click();
+    wait_for(&mut h, "one page", |h| h.query_by_label_contains("1–40 of 40").is_some());
+
+    // ".5" is in the `mrr` of 13 rows; the previous match wraps to the last, in row 37.
+    type_into(&mut h, "Search", ".5");
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    h.run();
+    h.get_by_label_contains("13 of 13 matches");
+    let cell = h.get_by_label("462.5").rect();
+    // The variables panel's heading, not the toolbar button to its left.
+    let right = h.query_all_by_label("Variables").map(|n| n.rect().min.x).fold(0.0, f32::max);
+    let bottom = h.get_by_label("Copy Markdown").rect().min.y;
+    assert!(cell.max.x <= right && cell.max.y <= bottom, "match at {cell:?} is out of view");
+}
