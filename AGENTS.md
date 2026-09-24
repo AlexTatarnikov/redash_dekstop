@@ -35,6 +35,7 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/state.rs` | All app logic. Pure: no egui, no I/O. `update(Event) -> Vec<Effect>`. Most tests live here. |
 | `src/app.rs` | Runtime (`RedashApp`). Performs effects (HTTP on background threads, settings I/O), feeds results back as events. |
 | `src/ui/*.rs` | Drawing only, one file per screen (`setup`, `editor`, `results`). Returns the `Event` the user triggered. |
+| `src/ui/theme.rs` | The visual theme, modelled on Figma's desktop UI (UI3): Inter font, palette, sizes, and helpers like `primary_button`. Light and dark follow the OS. |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
 | `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests). |
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour. |
@@ -62,6 +63,10 @@ flow in `tests/ui.rs`.
   When unsure, read the source in `~/.cargo/registry/src/*/egui-0.36.*/` rather than guessing.
 - The default egui font lacks many symbols (`→`, `⟳` render as ☐). Stick to ASCII or
   glyphs already used in the UI (`▶`, `…`), and check the snapshot.
+- Styling goes through `ui/theme.rs`: no hard-coded colours or font sizes in screens. Use
+  `theme::primary_button` for a screen's main action and `theme::bar_frame` for bars.
+  Fonts are embedded from `assets/fonts/` (Inter, SIL Open Font License; keep `Inter-LICENSE.txt`).
+  Check both `editor_results.png` (dark) and `editor_results_light.png` after visual changes.
 - Widgets must be findable by tests: give text inputs an accessible label with
   `.labelled_by(label.id)`; buttons are found by their text.
 - Snapshots must be deterministic: `tests/ui.rs::snapshot` hides the cursor and masks the

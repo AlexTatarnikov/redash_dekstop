@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use super::theme;
 use crate::state::{Event, SetupState};
 
 const FORM_WIDTH: f32 = 400.0;
@@ -40,7 +41,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SetupState) -> Option<Event> {
                     ui.label("");
                     ui.horizontal(|ui| {
                         let ready = s.can_connect();
-                        let clicked = ui.add_enabled(ready, egui::Button::new("Connect")).clicked();
+                        let clicked = ui.add_enabled(ready, theme::primary_button("Connect")).clicked();
                         if ready && (clicked || submit) {
                             event = Some(Event::Connect);
                         }

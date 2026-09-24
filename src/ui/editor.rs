@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::results;
+use super::{results, theme};
 use crate::api::normalize_host;
 use crate::state::{EditorState, Event};
 
@@ -10,8 +10,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
         event = Some(Event::Execute);
     }
 
-    egui::Panel::top("toolbar").show(ui, |ui| {
-        ui.add_space(4.0);
+    egui::Panel::top("toolbar").frame(theme::bar_frame(ui.style())).show(ui, |ui| {
         ui.horizontal(|ui| {
             let selected = ed
                 .data_sources
@@ -37,7 +36,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             }
 
             let run = ui
-                .add_enabled(ed.can_execute(), egui::Button::new("▶ Execute"))
+                .add_enabled(ed.can_execute(), theme::primary_button("▶ Execute"))
                 .on_hover_text("Cmd/Ctrl + Enter");
             if run.clicked() {
                 event = Some(Event::Execute);
@@ -53,10 +52,9 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
                 ui.weak(normalize_host(&ed.config.host));
             });
         });
-        ui.add_space(4.0);
     });
 
-    egui::Panel::bottom("status").show(ui, |ui| {
+    egui::Panel::bottom("status").frame(theme::bar_frame(ui.style())).show(ui, |ui| {
         ui.horizontal(|ui| {
             if let Some(err) = &ed.error {
                 ui.colored_label(ui.visuals().error_fg_color, err);

@@ -39,7 +39,15 @@ fn wait_for(h: &mut Harness<'_, RedashApp>, what: &str, done: impl Fn(&Harness<'
 fn snapshot(h: &mut Harness<'_, RedashApp>, name: &str) {
     h.remove_cursor();
     h.run_steps(2);
-    let mut rects: Vec<_> = h.query_all_by_label_contains("http://127.0.0.1").map(|n| n.rect()).collect();
+    // The host label's width depends on the port's digits (Inter digits vary in width),
+    // so mask a fixed-width area ending at its right edge (it is right-aligned).
+    let mut rects: Vec<_> = h
+        .query_all_by_label_contains("http://127.0.0.1")
+        .map(|n| {
+            let r = n.rect();
+            egui::Rect::from_min_max(egui::pos2(r.max.x - 160.0, r.min.y), egui::pos2(r.max.x + 3.0, r.max.y))
+        })
+        .collect();
     rects.extend(h.query_by_label("API host").map(|n| n.rect()));
     for rect in rects {
         h.mask(rect);
@@ -101,4 +109,16 @@ fn saved_config_opens_editor_and_shows_query_errors() {
     ed.sql = "select fail".into();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
     wait_for(&mut h, "error", |h| h.query_by_label_contains("syntax error").is_some());
+}
+
+#[test]
+fn light_theme() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    h.ctx.set_theme(egui::Theme::Light);
+    wait_for(&mut h, "data sources", sources_loaded);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+    snapshot(&mut h, "editor_results_light");
 }

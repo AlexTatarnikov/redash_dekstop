@@ -18,13 +18,14 @@ pub struct RedashApp {
     pending: Vec<Effect>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
+    themed: bool,
 }
 
 impl RedashApp {
     pub fn new(store: ConfigStore) -> Self {
         let (state, pending) = AppState::new(store.load());
         let (tx, rx) = channel();
-        Self { state, store, pending, tx, rx }
+        Self { state, store, pending, tx, rx, themed: false }
     }
 
     pub fn state(&self) -> &AppState {
@@ -38,6 +39,11 @@ impl RedashApp {
     /// Draws one frame. Used by both eframe and the UI tests.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if !self.themed {
+            ui::theme::apply(&ctx);
+            self.themed = true;
+            ctx.request_repaint(); // the theme applies from the next frame
+        }
         for effect in std::mem::take(&mut self.pending) {
             self.perform(&ctx, effect);
         }

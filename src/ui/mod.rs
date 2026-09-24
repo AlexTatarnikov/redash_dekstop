@@ -4,6 +4,7 @@
 mod editor;
 mod results;
 mod setup;
+pub(crate) mod theme;
 
 use eframe::egui;
 

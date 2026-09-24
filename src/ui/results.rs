@@ -2,6 +2,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use serde_json::Value;
 
+use super::theme;
 use crate::api::QueryResult;
 use crate::state::ResultView;
 
@@ -14,7 +15,7 @@ const MEASURED_ROWS: usize = 1000;
 pub fn show(ui: &mut egui::Ui, view: &mut ResultView) {
     let r = &view.result;
     let widths = view.col_widths.get_or_insert_with(|| fit_column_widths(ui.ctx(), r));
-    let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 6.0;
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
 
     egui::ScrollArea::horizontal().auto_shrink(false).show(ui, |ui| {
         let mut table = TableBuilder::new(ui)
@@ -35,7 +36,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut ResultView) {
             .header(row_height, |mut header| {
                 for c in &r.data.columns {
                     header.col(|ui| {
-                        ui.strong(&c.name);
+                        ui.label(egui::RichText::new(&c.name).font(header_font()));
                     });
                 }
             })
@@ -43,8 +44,13 @@ pub fn show(ui: &mut egui::Ui, view: &mut ResultView) {
                 body.rows(row_height, r.data.rows.len(), |mut row| {
                     let data = &r.data.rows[row.index()];
                     for c in &r.data.columns {
-                        row.col(|ui| {
-                            ui.monospace(cell_text(data.get(&c.name)));
+                        row.col(|ui| match data.get(&c.name) {
+                            None | Some(Value::Null) => {
+                                ui.weak("NULL");
+                            }
+                            value => {
+                                ui.label(cell_text(value));
+                            }
                         });
                     }
                 });
@@ -52,11 +58,15 @@ pub fn show(ui: &mut egui::Ui, view: &mut ResultView) {
     });
 }
 
+fn header_font() -> egui::FontId {
+    theme::semibold(12.0)
+}
+
 /// Width that fits each column's header and (up to `MEASURED_ROWS`) values.
 fn fit_column_widths(ctx: &egui::Context, r: &QueryResult) -> Vec<f32> {
     let style = ctx.global_style();
-    let header_font = egui::TextStyle::Body.resolve(&style);
-    let cell_font = egui::TextStyle::Monospace.resolve(&style);
+    let header_font = header_font();
+    let cell_font = egui::TextStyle::Body.resolve(&style);
     let padding = style.spacing.item_spacing.x * 2.0;
     ctx.fonts_mut(|fonts| {
         r.data
