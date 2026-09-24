@@ -8,4 +8,5 @@ tests/snapshots/*.old.png
 .DS_Store
 .idea/
 .vscode/
+.zed/
 *.swp
