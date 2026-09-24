@@ -1,4 +1,5 @@
-//! Connection settings, variables and execution history, and where they are persisted.
+//! Connection settings, variables, execution history and saved queries, and where they
+//! are persisted.
 
 use std::fs;
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::history::Entry;
+use crate::saved::SavedQuery;
 use crate::vars::Variable;
 
 /// Connection settings persisted between app launches.
@@ -17,14 +19,15 @@ pub struct Config {
     pub api_key: String,
 }
 
-/// Loads and saves [`Config`], and the user's variables and history next to it. Tests use
+/// Loads and saves [`Config`], and the user's variables, history and saved queries next
+/// to it. Tests use
 /// [`ConfigStore::memory`] so they never touch the user's real settings files.
 #[derive(Debug)]
 pub enum ConfigStore {
-    /// The config file; variables go to `variables.json` and history to
-    /// `history.json` in the same directory.
+    /// The config file; variables go to `variables.json`, history to `history.json`
+    /// and saved queries to `saved.json` in the same directory.
     File(PathBuf),
-    Memory(Mutex<Option<Config>>, Mutex<Vec<Variable>>, Mutex<Vec<Entry>>),
+    Memory(Mutex<Option<Config>>, Mutex<Vec<Variable>>, Mutex<Vec<Entry>>, Mutex<Vec<SavedQuery>>),
 }
 
 impl ConfigStore {
@@ -35,7 +38,12 @@ impl ConfigStore {
     }
 
     pub fn memory(initial: Option<Config>) -> Self {
-        Self::Memory(Mutex::new(initial), Mutex::new(Vec::new()), Mutex::new(Vec::new()))
+        Self::Memory(
+            Mutex::new(initial),
+            Mutex::new(Vec::new()),
+            Mutex::new(Vec::new()),
+            Mutex::new(Vec::new()),
+        )
     }
 
     /// Returns `None` if nothing has been saved yet or the file is unreadable.
@@ -82,64 +90,76 @@ impl ConfigStore {
     /// Saved variables; none if nothing has been saved yet.
     pub fn load_variables(&self) -> Result<Vec<Variable>> {
         match self {
-            Self::File(path) => match fs::read_to_string(variables_file(path)) {
-                Ok(raw) => Ok(serde_json::from_str(&raw)?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-                Err(e) => Err(e.into()),
-            },
-            Self::Memory(_, vars, _) => Ok(lock(vars)?.clone()),
+            Self::File(path) => load_list(&path.with_file_name("variables.json")),
+            Self::Memory(_, vars, ..) => Ok(lock(vars)?.clone()),
         }
     }
 
     /// Kept when disconnecting: they don't hold credentials.
     pub fn save_variables(&self, variables: &[Variable]) -> Result<()> {
         match self {
-            Self::File(path) => {
-                let path = variables_file(path);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(path, serde_json::to_string_pretty(variables)?)?;
+            Self::File(path) => save_list(&path.with_file_name("variables.json"), variables),
+            Self::Memory(_, vars, ..) => {
+                *lock(vars)? = variables.to_vec();
+                Ok(())
             }
-            Self::Memory(_, vars, _) => *lock(vars)? = variables.to_vec(),
         }
-        Ok(())
     }
 
     /// Saved history, newest first; empty if nothing has been saved yet.
     pub fn load_history(&self) -> Result<Vec<Entry>> {
         match self {
-            Self::File(path) => match fs::read_to_string(history_file(path)) {
-                Ok(raw) => Ok(serde_json::from_str(&raw)?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-                Err(e) => Err(e.into()),
-            },
-            Self::Memory(.., history) => Ok(lock(history)?.clone()),
+            Self::File(path) => load_list(&path.with_file_name("history.json")),
+            Self::Memory(_, _, history, _) => Ok(lock(history)?.clone()),
         }
     }
 
     /// Kept when disconnecting, like variables.
     pub fn save_history(&self, history: &[Entry]) -> Result<()> {
         match self {
-            Self::File(path) => {
-                let path = history_file(path);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(path, serde_json::to_string_pretty(history)?)?;
+            Self::File(path) => save_list(&path.with_file_name("history.json"), history),
+            Self::Memory(_, _, slot, _) => {
+                *lock(slot)? = history.to_vec();
+                Ok(())
             }
-            Self::Memory(.., slot) => *lock(slot)? = history.to_vec(),
         }
-        Ok(())
+    }
+
+    /// Saved queries, newest first; empty if none have been saved yet.
+    pub fn load_saved(&self) -> Result<Vec<SavedQuery>> {
+        match self {
+            Self::File(path) => load_list(&path.with_file_name("saved.json")),
+            Self::Memory(.., saved) => Ok(lock(saved)?.clone()),
+        }
+    }
+
+    /// Kept when disconnecting, like variables.
+    pub fn save_saved(&self, saved: &[SavedQuery]) -> Result<()> {
+        match self {
+            Self::File(path) => save_list(&path.with_file_name("saved.json"), saved),
+            Self::Memory(.., slot) => {
+                *lock(slot)? = saved.to_vec();
+                Ok(())
+            }
+        }
     }
 }
 
-fn variables_file(config_file: &std::path::Path) -> PathBuf {
-    config_file.with_file_name("variables.json")
+/// A JSON list from `path`; empty if the file doesn't exist yet.
+fn load_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<Vec<T>> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(serde_json::from_str(&raw)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
 }
 
-fn history_file(config_file: &std::path::Path) -> PathBuf {
-    config_file.with_file_name("history.json")
+fn save_list<T: Serialize>(path: &std::path::Path, items: &[T]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(items)?)?;
+    Ok(())
 }
 
 fn lock<T>(slot: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
@@ -203,5 +223,18 @@ mod tests {
         store.save_history(std::slice::from_ref(&entry)).unwrap();
         assert!(dir.path().join("history.json").exists());
         assert_eq!(store.load_history().unwrap(), [entry]);
+    }
+
+    #[test]
+    fn file_store_keeps_saved_queries_next_to_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::File(dir.path().join("config.json"));
+        assert_eq!(store.load_saved().unwrap(), []);
+
+        let query = SavedQuery::new(5, 1, "select 1", &[]);
+        store.save_saved(std::slice::from_ref(&query)).unwrap();
+        assert!(dir.path().join("saved.json").exists());
+        store.clear().unwrap();
+        assert_eq!(store.load_saved().unwrap(), [query], "survive disconnecting");
     }
 }

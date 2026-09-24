@@ -37,19 +37,22 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/state.rs` | All app logic. Pure: no egui, no I/O. `update(Event) -> Vec<Effect>`. Most tests live here. |
 | `src/app.rs` | Runtime (`RedashApp`). Performs effects (HTTP on background threads, settings I/O, clipboard, the native save dialog via `rfd`), feeds results back as events. |
 | `src/ui/*.rs` | Drawing only, one file per screen (`setup`, `editor`, `results`). Returns the `Event` the user triggered. |
-| `src/ui/theme.rs` | The visual theme, modelled on Figma's desktop UI (UI3): Inter font, palette, sizes, and helpers like `primary_button`. Light and dark follow the OS. |
+| `src/ui/theme.rs` | The visual theme, modelled on Figma's desktop UI (UI3): Inter font, palette, sizes, and helpers like `primary_button`. Light and dark follow the OS. Controls are outlined; secondary text meets WCAG AA contrast. `value_color` colours result cells by `export::ValueKind` (numbers, dates, booleans, JSON, NULL) using the SQL syntax palette. |
 | `src/sql.rs` | Pure SQL tokenizer for editor highlighting; colours (GitHub's palette) are `theme::syntax_color`. |
 | `src/complete.rs` | Pure SQL autocompletion: suggestions at the cursor from the schema (aliases, `schema.`, `FROM` context). |
 | `src/ui/completion.rs` | The editor's autocomplete popup: when it opens, its keys (↑/↓, Enter/Tab, Esc, Ctrl+Space), drawing. |
 | `src/vars.rs` | Pure variables: `{{ name }}` references and substitution, a query result as a value (first column as SQL literals). `state.rs` runs the query variables a run needs before it. |
 | `src/ui/variables.rs` | The variables panel (right side): value and query variables, edited in place. |
 | `src/history.rs` | Pure execution history: each Execute records a snapshot (SQL, data source, variable definitions), newest first, last 20; rerunning the newest only updates its time. |
-| `src/ui/history.rs` | The history tab of the left sidebar (shown by default; the toolbar's leftmost icon button collapses the sidebar): click an entry to restore it. |
-| `src/schema.rs` | Pure schema filtering for the schema panel: tables matching by name keep all columns, otherwise only matching columns. |
+| `src/ui/history.rs` | The history tab of the left sidebar (shown by default; the toolbar's leftmost icon button collapses the sidebar): click an entry to restore it. Its `row`/`meta` draw the saved queries too. |
+| `src/saved.rs` | Pure saved queries: like a history snapshot, but kept on purpose (toolbar Save / Cmd+S), newest first, no limit, with a name (the first SQL line until renamed). |
+| `src/ui/saved.rs` | The saved tab of the left sidebar: click to restore; right-click (or double-click) to rename in place (`EditorState::renaming`; Enter or clicking away keeps it, Esc cancels) or delete. Saving opens the tab and starts renaming the new query. |
+| `src/schema.rs` | Pure schema filtering for the schema panel: tables matching by name come first and keep all columns, otherwise only matching columns. |
 | `src/ui/schema.rs` | The schema tab of the left sidebar: the selected data source's tables, expanding to columns and types, a filter, and Refresh. |
-| `src/export.rs` | Pure result export: Markdown table (current page, to the clipboard) and CSV (whole result). |
+| `src/search.rs` | Pure results search, like a browser's find in page, over the shown page only (rerun when the page changes, so huge results stay cheap): every occurrence in the values (as shown, so `null` finds NULLs; not column names) and the page's rows containing one. The table hides the page's other rows, highlights matches (`theme::search_match`), and Enter / Shift+Enter cycle the selected match; Cmd/Ctrl+F focuses the box, Esc clears it. Copy Markdown copies the rows shown; CSV exports the whole result. |
+| `src/export.rs` | `ValueKind` of a cell (numbers are right-aligned and coloured in the table). Pure result export: Markdown table (current page, to the clipboard), a failed query's error as a Markdown code block (shown in the results area instead of the table), and CSV (whole result). |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
-| `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests); also saves variables to `variables.json` and history to `history.json` next to the config. |
+| `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests); also saves variables to `variables.json`, history to `history.json` and saved queries to `saved.json` next to the config. |
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour; `queries()` returns the SQL it was sent. |
 | `src/main.rs` | Entry point; parses `--mock`; sets the window icon from `assets/icon.png`. |
 | `assets/icon.svg` | App icon source (macOS grid: 824px tile on 1024px). Rendered to the committed `assets/icon.png`, which `bundle-macos.sh` turns into `Redash.icns`. |

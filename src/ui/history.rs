@@ -3,8 +3,10 @@
 
 use eframe::egui;
 
+use crate::api::DataSource;
 use crate::history::{self, Entry};
 use crate::state::{EditorState, Event};
+use crate::vars::Variable;
 
 /// The panel's header buttons, drawn right to left.
 pub fn actions(ui: &mut egui::Ui, ed: &EditorState) -> Option<Event> {
@@ -40,19 +42,38 @@ pub fn show(ui: &mut egui::Ui, ed: &EditorState) -> Option<Event> {
 
 /// One entry: its first SQL line, then data source, variable count and age.
 fn item(ui: &mut egui::Ui, ed: &EditorState, entry: &Entry, now: u64, i: usize) -> egui::Response {
-    let source = ed
-        .data_sources
-        .iter()
-        .find(|s| s.id == entry.data_source_id)
-        .map_or("Unknown source", |s| s.name.as_str());
+    let meta =
+        meta(&ed.data_sources, entry.data_source_id, &entry.variables, history::ago(entry.executed_at, now));
+    row(ui, ("history", i), egui::RichText::new(entry.title()).monospace(), &meta, &entry.sql)
+}
+
+/// "Source · N variables · `age`" under a snapshot's title.
+pub(super) fn meta(
+    sources: &[DataSource],
+    data_source_id: i64,
+    variables: &[Variable],
+    age: String,
+) -> String {
+    let source =
+        sources.iter().find(|s| s.id == data_source_id).map_or("Unknown source", |s| s.name.as_str());
     let mut meta = vec![source.to_string()];
-    let n = entry.variables.len();
+    let n = variables.len();
     if n > 0 {
         meta.push(format!("{n} {}", if n == 1 { "variable" } else { "variables" }));
     }
-    meta.push(history::ago(entry.executed_at, now));
+    meta.push(age);
+    meta.join(" · ")
+}
 
-    let builder = egui::UiBuilder::new().id_salt(("history", i)).sense(egui::Sense::click());
+/// A clickable snapshot: `title` over the weak `meta` line; hovering shows `sql`.
+pub(super) fn row(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    title: egui::RichText,
+    meta: &str,
+    sql: &str,
+) -> egui::Response {
+    let builder = egui::UiBuilder::new().id_salt(id_salt).sense(egui::Sense::click());
     ui.scope_builder(builder, |ui| {
         let widgets = &ui.visuals().widgets;
         let (fill, radius) = if ui.response().hovered() && ui.is_enabled() {
@@ -64,15 +85,14 @@ fn item(ui: &mut egui::Ui, ed: &EditorState, entry: &Entry, now: u64, i: usize) 
             ui,
             |ui| {
                 ui.set_width(ui.available_width());
-                let title = egui::RichText::new(entry.title()).monospace();
                 ui.add(egui::Label::new(title).truncate().selectable(false));
-                let meta = egui::RichText::new(meta.join(" · ")).weak();
+                let meta = egui::RichText::new(meta).weak();
                 ui.add(egui::Label::new(meta).truncate().selectable(false));
             },
         );
     })
     .response
     .on_hover_ui(|ui| {
-        ui.label(egui::RichText::new(&entry.sql).monospace());
+        ui.label(egui::RichText::new(sql).monospace());
     })
 }

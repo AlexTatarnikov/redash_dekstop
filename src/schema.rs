@@ -11,13 +11,14 @@ pub struct Match<'a> {
     pub by_column: bool,
 }
 
-/// The tables matching `filter` (case-insensitive substring), in schema order. A
-/// table whose name matches keeps all its columns; otherwise only the matching
-/// columns are kept, and tables with none are left out. An empty filter keeps all.
+/// The tables matching `filter` (case-insensitive substring): tables matching by name
+/// first, then those matching by column, each group in schema order. A table whose
+/// name matches keeps all its columns; otherwise only the matching columns are kept,
+/// and tables with none are left out. An empty filter keeps all.
 pub fn filter<'a>(tables: &'a [Table], filter: &str) -> Vec<Match<'a>> {
     let needle = filter.trim().to_lowercase();
     let matches = |name: &str| name.to_lowercase().contains(&needle);
-    tables
+    let mut shown: Vec<_> = tables
         .iter()
         .filter_map(|table| {
             if needle.is_empty() || matches(&table.name) {
@@ -26,7 +27,10 @@ pub fn filter<'a>(tables: &'a [Table], filter: &str) -> Vec<Match<'a>> {
             let columns: Vec<_> = table.columns.iter().filter(|c| matches(&c.name)).collect();
             (!columns.is_empty()).then_some(Match { table, columns, by_column: true })
         })
-        .collect()
+        .collect();
+    // Stable: keeps schema order within each group.
+    shown.sort_by_key(|m| m.by_column);
+    shown
 }
 
 #[cfg(test)]
@@ -42,6 +46,7 @@ mod tests {
             table("users", &["id", "email", "plan"]),
             table("orders", &["id", "user_id", "amount"]),
             table("billing.invoices", &["id", "order_id"]),
+            table("plans", &["id", "price"]),
         ]
     }
 
@@ -59,7 +64,7 @@ mod tests {
     #[test]
     fn empty_filter_shows_everything() {
         let all = shown("  ");
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         assert_eq!(all[0], ("users".into(), vec!["id".into(), "email".into(), "plan".into()], false));
     }
 
@@ -81,5 +86,16 @@ mod tests {
             ]
         );
         assert_eq!(shown("nothing"), []);
+    }
+
+    #[test]
+    fn table_name_matches_come_before_column_matches() {
+        assert_eq!(
+            shown("plan"),
+            [
+                ("plans".into(), vec!["id".into(), "price".into()], false),
+                ("users".into(), vec!["plan".into()], true),
+            ]
+        );
     }
 }

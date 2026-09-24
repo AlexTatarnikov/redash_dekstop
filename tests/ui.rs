@@ -94,6 +94,15 @@ fn type_into(h: &mut Harness<'_, RedashApp>, label: &str, text: &str) {
     h.run_steps(2);
 }
 
+/// Like `type_into`, but replaces the field's text.
+fn replace_text(h: &mut Harness<'_, RedashApp>, label: &str, text: &str) {
+    h.get_by_label(label).click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get_by_label(label).type_text(text);
+    h.run_steps(2);
+}
+
 #[test]
 fn connect_run_query_and_disconnect() {
     let mock = MockRedash::start().unwrap();
@@ -138,6 +147,43 @@ fn saved_config_opens_editor_and_shows_query_errors() {
     ed.sql = "select fail".into();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
     wait_for(&mut h, "error", |h| h.query_by_label_contains("syntax error").is_some());
+    snapshot(&mut h, "editor_query_error");
+
+    h.get_by_label("Copy Markdown").click();
+    h.step();
+    let copied = h.output().platform_output.commands.iter().find_map(|c| match c {
+        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(copied.as_deref(), Some("```\nsyntax error at or near \"fail\"\n```\n"));
+    wait_for(&mut h, "notice", |h| h.query_by_label_contains("Copied the error as Markdown").is_some());
+}
+
+#[test]
+fn busy_toolbar_keeps_its_layout() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    let rects = |h: &Harness<'_, RedashApp>| {
+        // "Variables" is also the variables panel's heading.
+        ["Reload", "▶ Execute", "Variables"]
+            .iter()
+            .flat_map(|label| h.query_all_by_label(label).map(|n| n.rect()))
+            .collect::<Vec<_>>()
+    };
+    let idle = rects(&h);
+
+    let set_busy = |h: &mut Harness<'_, RedashApp>, busy: bool| {
+        let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+        ed.running = busy;
+        ed.loading_sources = busy;
+    };
+    set_busy(&mut h, true);
+    h.run_steps(2);
+    assert_eq!(rects(&h), idle, "toolbar buttons moved while busy");
+    h.get_by_label("Running…");
+    set_busy(&mut h, false);
+    h.run_steps(2);
 }
 
 #[test]
@@ -305,6 +351,66 @@ fn copies_page_as_markdown_and_exports_csv() {
 }
 
 #[test]
+fn search_finds_and_cycles_through_matches() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+
+    // "pro" is a `plan` in every third row; only the page is searched, all columns stay.
+    type_into(&mut h, "Search", "pro");
+    h.get_by_label("1 of 9 matches · 9 of 25 rows");
+    h.get_by_label("1–25 of 40");
+    h.get_by_label("user1@example.com");
+    assert!(h.query_by_label("user2@example.com").is_none(), "only matching rows");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    h.get_by_label("2 of 9 matches · 9 of 25 rows");
+    snapshot(&mut h, "editor_results_search");
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    h.run_steps(2);
+    h.get_by_label("1 of 9 matches · 9 of 25 rows");
+
+    h.get_by_label("Copy Markdown").click();
+    h.step();
+    let copied = h.output().platform_output.commands.iter().find_map(|c| match c {
+        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+        _ => None,
+    });
+    let copied = copied.expect("copied to the clipboard");
+    assert!(copied.starts_with("| id | email | plan | signed_up | mrr |\n"), "all columns");
+    assert_eq!(copied.lines().count(), 2 + 9, "only the rows shown");
+
+    // Cmd+F selects the search to type over it; the previous match wraps to the page's last.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    h.run_steps(2);
+    assert!(h.get_by_label("Search").is_focused());
+    h.get_by_label("Search").type_text("example");
+    h.run_steps(2);
+    h.get_by_label("1 of 25 matches · 25 of 25 rows");
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    h.run_steps(2);
+    h.get_by_label("25 of 25 matches · 25 of 25 rows");
+    h.get_by_label("user25@example.com");
+
+    // The next page is searched when shown.
+    h.get_by_label("›").click();
+    wait_for(&mut h, "page 2", |h| h.query_by_label("26–40 of 40").is_some());
+    h.get_by_label("1 of 15 matches · 15 of 15 rows");
+
+    replace_text(&mut h, "Search", "zzz");
+    h.get_by_label("No matches");
+    h.get_by_label("26–40 of 40");
+    assert!(h.query_by_label("user26@example.com").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("user26@example.com");
+    assert!(h.query_by_label("No matches").is_none(), "Esc clears the search");
+}
+
+#[test]
 fn query_variables_feed_the_query() {
     let mock = MockRedash::start().unwrap();
     let mut h = harness(RedashApp::new(ConfigStore::memory(mock_config(&mock))));
@@ -375,6 +481,67 @@ fn history_restores_a_past_run() {
     let Screen::Editor(ed) = &h.state().state().screen else { panic!("expected editor") };
     assert_eq!(ed.sql, SAMPLE_SQL);
     assert_eq!(ed.variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["start", "limit"]);
+}
+
+#[test]
+fn saves_renames_restores_and_deletes_queries() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    let saved_names = |h: &Harness<'_, RedashApp>| match &h.state().state().screen {
+        Screen::Editor(ed) => ed.saved.iter().map(|q| q.name.clone()).collect::<Vec<_>>(),
+        Screen::Setup(_) => panic!("expected editor"),
+    };
+    h.get_by_label("Saved").click();
+    h.run_steps(2);
+    h.get_by_label_contains("No saved queries");
+
+    // Saving opens the name, selected, to type over it.
+    set_sql(&mut h, SAMPLE_SQL);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    h.run_steps(3);
+    assert!(h.get_by_label("Name").is_focused());
+    h.get_by_label("Name").type_text("Paying users");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(saved_names(&h), ["Paying users"]);
+
+    set_sql(&mut h, "SELECT 1");
+    h.get_by_label("Save").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(saved_names(&h), ["SELECT 1", "Paying users"], "Esc keeps the first line as name");
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.variables.clear();
+    h.run_steps(2);
+    snapshot(&mut h, "editor_saved");
+
+    h.get_by_label("Paying users").click();
+    h.run_steps(2);
+    let Screen::Editor(ed) = &h.state().state().screen else { panic!("expected editor") };
+    assert_eq!(ed.sql, SAMPLE_SQL);
+    assert_eq!(ed.variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["start", "limit"]);
+
+    h.get_by_label("SELECT 1").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get_by_label("Name").type_text("One");
+    h.run_steps(2);
+    h.get_by_label("Paying users").click(); // clicking away keeps the name
+    h.run_steps(2);
+    assert_eq!(saved_names(&h), ["One", "Paying users"]);
+
+    // The variables panel has Delete buttons too.
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.show_variables = false;
+    h.get_by_label("Paying users").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Delete").click();
+    h.run_steps(2);
+    assert_eq!(saved_names(&h), ["One"]);
 }
 
 #[test]

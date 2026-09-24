@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::{completion, history, results, schema, theme, variables};
+use super::{completion, history, results, saved, schema, theme, variables};
 use crate::api::normalize_host;
 use crate::sql::tokenize;
 use crate::state::{EditorState, Event, SidebarTab, toggle_line_comment};
@@ -10,10 +10,13 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     if ed.can_execute() && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
         event = Some(Event::Execute);
     }
+    if ed.can_save() && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        event = Some(Event::SaveQuery);
+    }
 
     egui::Panel::top("toolbar").frame(theme::bar_frame(ui.style())).show(ui, |ui| {
         ui.horizontal(|ui| {
-            let tip = if ed.show_sidebar { "Hide sidebar" } else { "Show history and schema" };
+            let tip = if ed.show_sidebar { "Hide sidebar" } else { "Show history, saved queries and schema" };
             if theme::sidebar_toggle(ui, ed.show_sidebar, "Toggle sidebar").on_hover_text(tip).clicked() {
                 event = Some(Event::ToggleSidebar);
             }
@@ -33,9 +36,10 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
                     }
                 },
             );
-            if ed.loading_sources {
-                ui.spinner();
-            } else if ui.button("Reload").on_hover_text("Reload data sources").clicked() {
+            // Busy states disable buttons rather than swapping them for a spinner, so the
+            // toolbar never shifts; progress is shown in the status bar.
+            let reload = ui.add_enabled(!ed.loading_sources, egui::Button::new("Reload"));
+            if reload.on_hover_text("Reload data sources").clicked() {
                 event = Some(Event::ReloadDataSources);
             }
 
@@ -45,8 +49,11 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             if run.clicked() {
                 event = Some(Event::Execute);
             }
-            if ed.running {
-                ui.spinner();
+            let save = ui
+                .add_enabled(ed.can_save(), egui::Button::new("Save"))
+                .on_hover_text("Keep this query with its data source and variables in Saved (Cmd/Ctrl + S)");
+            if save.clicked() {
+                event = Some(Event::SaveQuery);
             }
             let vars = egui::Button::new("Variables").selected(ed.show_variables);
             if ui.add(vars).on_hover_text("Values and queries to use as {{ name }}").clicked() {
@@ -64,8 +71,17 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
 
     egui::Panel::bottom("status").frame(theme::bar_frame(ui.style())).show(ui, |ui| {
         ui.horizontal(|ui| {
-            if let Some(err) = &ed.error {
+            if ed.running || ed.loading_sources {
+                ui.spinner();
+                ui.weak(if ed.running { "Running…" } else { "Loading data sources…" });
+            } else if let Some(err) = &ed.error {
                 ui.colored_label(ui.visuals().error_fg_color, err);
+            } else if ed.query_error.is_some() {
+                let mut status = "Query failed".to_string();
+                if let Some(notice) = &ed.notice {
+                    status += &format!(" · {notice}");
+                }
+                ui.label(status);
             } else if let Some(view) = &ed.result {
                 let mut status =
                     format!("{} rows · {:.3}s", view.result.data.rows.len(), view.result.runtime);
@@ -76,13 +92,16 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             } else {
                 ui.weak("Ready");
             }
-            if let Some(view) = &ed.result {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(e) = results::pager(ui, view, ed.page_size) {
-                        event = Some(e);
-                    }
-                });
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let action = match (&ed.result, &ed.query_error) {
+                    (Some(view), _) => results::pager(ui, view, ed.page_size),
+                    (None, Some(_)) => results::error_actions(ui),
+                    (None, None) => None,
+                };
+                if let Some(e) = action {
+                    event = Some(e);
+                }
+            });
         });
     });
 
@@ -156,9 +175,14 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             });
         });
 
-    egui::CentralPanel::default_margins().show(ui, |ui| match &mut ed.result {
-        Some(view) => results::show(ui, view, ed.page_size),
-        None => {
+    egui::CentralPanel::default_margins().show(ui, |ui| match (&mut ed.result, &ed.query_error) {
+        (Some(view), _) => {
+            if let Some(e) = results::show(ui, view, ed.page_size) {
+                event = Some(e);
+            }
+        }
+        (None, Some(err)) => results::error(ui, err),
+        (None, None) => {
             ui.centered_and_justified(|ui| ui.weak("Run a query to see results"));
         }
     });
@@ -166,25 +190,35 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     event
 }
 
-/// The left sidebar: tabs for history and schema, the current tab's buttons, then its content.
+/// The left sidebar: tabs for history, saved queries and schema, the current tab's
+/// buttons (if any), then its content.
 fn sidebar(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     let mut event = None;
     ui.horizontal(|ui| {
-        for (tab, label) in [(SidebarTab::History, "History"), (SidebarTab::Schema, "Schema")] {
+        let tabs =
+            [(SidebarTab::History, "History"), (SidebarTab::Saved, "Saved"), (SidebarTab::Schema, "Schema")];
+        for (tab, label) in tabs {
             if ui.add(egui::Button::new(label).selected(ed.sidebar_tab == tab)).clicked() {
                 event = Some(Event::ShowSidebarTab(tab));
             }
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let action = match ed.sidebar_tab {
-                SidebarTab::History => history::actions(ui, ed),
-                SidebarTab::Schema => schema::actions(ui, ed),
-            };
-            event = event.take().or(action);
-        });
     });
+    // On their own row: three tabs leave no room beside them in a narrow sidebar.
+    if ed.sidebar_tab != SidebarTab::Saved {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let action = match ed.sidebar_tab {
+                    SidebarTab::History => history::actions(ui, ed),
+                    SidebarTab::Saved => None,
+                    SidebarTab::Schema => schema::actions(ui, ed),
+                };
+                event = event.take().or(action);
+            });
+        });
+    }
     let shown = match ed.sidebar_tab {
         SidebarTab::History => history::show(ui, ed),
+        SidebarTab::Saved => saved::show(ui, ed),
         SidebarTab::Schema => schema::show(ui, ed),
     };
     event.or(shown)

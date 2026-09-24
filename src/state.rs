@@ -13,6 +13,8 @@ use crate::api::{DataSource, QueryResult, Table};
 use crate::config::Config;
 use crate::export;
 use crate::history::{self, Entry};
+use crate::saved::{self, SavedQuery};
+use crate::search::{self, Found, Hit};
 use crate::vars::{self, Definition, Run, Variable};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,7 +29,14 @@ pub enum Event {
     ShowPage(usize),
     /// Change rows per page, keeping the first visible row on screen.
     SetPageSize(usize),
-    /// Copy the rows on the current page to the clipboard as a Markdown table.
+    /// Find this text in the values of the current page (and each page shown after),
+    /// showing only the rows containing it and selecting the first occurrence; see `search.rs`.
+    SearchResults(String),
+    /// Select the next (`true`) or previous occurrence of the search on the page,
+    /// wrapping around.
+    NextMatch(bool),
+    /// Copy the rows on the current page to the clipboard as a Markdown table, or
+    /// the query error as a code block.
     CopyPageMarkdown,
     /// Save the whole result as a CSV file chosen by the user.
     ExportCsv,
@@ -40,7 +49,7 @@ pub enum Event {
     VariablesEdited,
     /// Rerun this query variable (and any variables it needs that have no value).
     RunVariable(u64),
-    /// Show or hide the left sidebar (history and schema).
+    /// Show or hide the left sidebar (history, saved queries and schema).
     ToggleSidebar,
     /// Switch the sidebar to this tab, showing it if hidden.
     ShowSidebarTab(SidebarTab),
@@ -49,6 +58,17 @@ pub enum Event {
     /// Put this history entry's SQL, data source and variables back in the editor.
     RestoreHistory(usize),
     ClearHistory,
+    /// Keep the editor's query (SQL, data source and variables) in the saved queries,
+    /// newest first, and start renaming it; see `saved.rs`.
+    SaveQuery,
+    /// Put this saved query's SQL, data source and variables back in the editor.
+    RestoreSaved(usize),
+    DeleteSaved(usize),
+    /// Edit this saved query's name in place (in [`EditorState::renaming`]).
+    StartRename(usize),
+    /// Keep the edited name; a blank one keeps the old name.
+    FinishRename,
+    CancelRename,
     // Results of effects, delivered by the runtime.
     DataSourcesLoaded(Result<Vec<DataSource>, String>),
     QueryFinished(Result<QueryResult, String>),
@@ -61,6 +81,7 @@ pub enum Event {
     CsvSaved(Result<Option<PathBuf>, String>),
     VariablesLoaded(Result<Vec<Variable>, String>),
     HistoryLoaded(Result<Vec<Entry>, String>),
+    SavedLoaded(Result<Vec<SavedQuery>, String>),
     VariableFinished {
         id: u64,
         result: Result<QueryResult, String>,
@@ -107,6 +128,9 @@ pub enum Effect {
     /// Read saved history. Answered by [`Event::HistoryLoaded`].
     LoadHistory,
     SaveHistory(Vec<Entry>),
+    /// Read saved queries. Answered by [`Event::SavedLoaded`].
+    LoadSaved,
+    StoreSaved(Vec<SavedQuery>),
     /// Run a query variable's SQL (variables already substituted). Answered by
     /// [`Event::VariableFinished`].
     RunVariable {
@@ -137,7 +161,16 @@ pub enum Schema {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarTab {
     History,
+    Saved,
     Schema,
+}
+
+/// A saved query whose name is being edited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renaming {
+    pub index: usize,
+    /// The name as typed so far, edited in place by the UI.
+    pub name: String,
 }
 
 /// Rows-per-page choices; the first is the default, as in Redash's web UI.
@@ -176,6 +209,8 @@ pub struct EditorState {
     pub sql: String,
     pub running: bool,
     pub result: Option<ResultView>,
+    /// Why the last run failed; shown in place of the result, which it replaces.
+    pub query_error: Option<String>,
     pub error: Option<String>,
     /// Confirmation of the last action (e.g. an export), shown in the status bar.
     pub notice: Option<String>,
@@ -193,6 +228,9 @@ pub struct EditorState {
     pending: Option<Target>,
     /// Snapshots of past runs, newest first; see `history.rs`.
     pub history: Vec<Entry>,
+    /// Queries kept by the user, newest first, without a limit; see `saved.rs`.
+    pub saved: Vec<SavedQuery>,
+    pub renaming: Option<Renaming>,
     pub show_sidebar: bool,
     pub sidebar_tab: SidebarTab,
     /// The schema panel's filter, edited in place by the UI; see `schema.rs`.
@@ -211,6 +249,7 @@ impl EditorState {
             sql: "SELECT 1".into(),
             running: false,
             result: None,
+            query_error: None,
             error: None,
             notice: None,
             page_size: PAGE_SIZES[0],
@@ -221,6 +260,8 @@ impl EditorState {
             next_variable_id: 0,
             pending: None,
             history: Vec::new(),
+            saved: Vec::new(),
+            renaming: None,
             show_sidebar: true,
             sidebar_tab: SidebarTab::History,
             schema_filter: String::new(),
@@ -230,6 +271,11 @@ impl EditorState {
 
     pub fn can_execute(&self) -> bool {
         self.selected_source.is_some() && !self.running && has_statement(&self.sql)
+    }
+
+    /// Whether there is SQL to save (comments count: they may be what's worth keeping).
+    pub fn can_save(&self) -> bool {
+        !self.sql.trim().is_empty()
     }
 
     /// Tables of the selected data source; empty until its schema has loaded.
@@ -257,6 +303,35 @@ impl EditorState {
         Effect::SaveHistory(self.history.clone())
     }
 
+    /// Puts a snapshot's SQL, data source and variables in the editor. Keeps the data
+    /// source (with an error) if the snapshot's no longer exists.
+    fn restore(&mut self, sql: String, data_source_id: i64, variables: Vec<Variable>) -> Vec<Effect> {
+        self.sql = sql;
+        self.set_variables(variables);
+        self.show_variables |= !self.variables.is_empty();
+        self.error = None;
+        let mut effects = self.save_variables();
+        if self.data_sources.iter().any(|s| s.id == data_source_id) {
+            self.selected_source = Some(data_source_id);
+            effects.extend(self.load_schema());
+        } else {
+            self.error = Some("This query's data source no longer exists; pick another".into());
+        }
+        effects
+    }
+
+    fn store_saved(&self) -> Vec<Effect> {
+        vec![Effect::StoreSaved(self.saved.clone())]
+    }
+
+    /// Applies the name being edited, if any. Empty when nothing changed.
+    fn finish_rename(&mut self) -> Vec<Effect> {
+        match self.renaming.take() {
+            Some(r) if saved::rename(&mut self.saved, r.index, &r.name) => self.store_saved(),
+            _ => Vec::new(),
+        }
+    }
+
     fn set_variables(&mut self, variables: Vec<Variable>) {
         self.variables.clear();
         for var in variables {
@@ -273,6 +348,9 @@ impl EditorState {
     fn start(&mut self, target: Target) -> Vec<Effect> {
         self.running = true;
         self.error = None;
+        if target == Target::Query {
+            self.query_error = None;
+        }
         self.notice = None;
         // Failed variables get another try.
         for var in &mut self.variables {
@@ -318,10 +396,18 @@ impl EditorState {
             Err(e) => {
                 self.pending = None;
                 self.running = false;
-                self.error = Some(e);
+                match target {
+                    Target::Query => self.fail_query(e),
+                    Target::Variable(_) => self.error = Some(e),
+                }
             }
         }
         effects
+    }
+
+    fn fail_query(&mut self, error: String) {
+        self.result = None;
+        self.query_error = Some(error);
     }
 
     /// `sql` with its variables substituted, or `None` while some are still
@@ -520,19 +606,52 @@ pub struct ResultView {
     pub col_widths: Option<Vec<f32>>,
     /// Current page, 0-based.
     pub page: usize,
+    /// The results search box's text.
+    pub search: String,
+    /// What `search` found on the current page; `found.rows` are the rows shown.
+    pub found: Found,
+    /// Index in `found.hits` of the selected occurrence.
+    pub current: usize,
 }
 
 impl ResultView {
+    fn new(result: QueryResult, id: u64, page_size: usize) -> Self {
+        let found = Found::default();
+        let mut view =
+            Self { result, id, col_widths: None, page: 0, search: String::new(), found, current: 0 };
+        view.find(page_size);
+        view
+    }
+
+    /// Runs the search on the current page, selecting its first occurrence.
+    fn find(&mut self, page_size: usize) {
+        self.found = search::search(&self.result, &self.search, self.page_rows(page_size));
+        self.current = 0;
+    }
+
     /// Number of pages; an empty result still has one (empty) page.
     pub fn page_count(&self, page_size: usize) -> usize {
         self.result.data.rows.len().div_ceil(page_size.max(1)).max(1)
     }
 
-    /// Indices of the rows on the current page.
+    /// Indices of the rows on the current page (before the search hides any).
     pub fn page_rows(&self, page_size: usize) -> Range<usize> {
         let len = self.result.data.rows.len();
         let start = (self.page * page_size).min(len);
         start..(start + page_size).min(len)
+    }
+
+    /// The selected occurrence of the search, if it found any.
+    pub fn current_hit(&self) -> Option<&Hit> {
+        self.found.hits.get(self.current)
+    }
+
+    /// The occurrences in a cell, and the index in `found.hits` of the first.
+    pub fn hits_in(&self, row: usize, column: usize) -> (usize, &[Hit]) {
+        let hits = &self.found.hits;
+        let start = hits.partition_point(|h| (h.row, h.column) < (row, column));
+        let len = hits[start..].iter().take_while(|h| (h.row, h.column) == (row, column)).count();
+        (start, &hits[start..start + len])
     }
 }
 
@@ -548,8 +667,12 @@ impl AppState {
             Some(config) => {
                 let mut editor = EditorState::new(config.clone());
                 editor.loading_sources = true;
-                let effects =
-                    vec![Effect::LoadDataSources(config), Effect::LoadVariables, Effect::LoadHistory];
+                let effects = vec![
+                    Effect::LoadDataSources(config),
+                    Effect::LoadVariables,
+                    Effect::LoadHistory,
+                    Effect::LoadSaved,
+                ];
                 (Self { screen: Screen::Editor(Box::new(editor)) }, effects)
             }
             None => (Self { screen: Screen::Setup(SetupState::default()) }, Vec::new()),
@@ -570,8 +693,12 @@ impl AppState {
                     Ok(sources) => {
                         let config = setup.config();
                         let mut editor = EditorState::new(config.clone());
-                        let mut effects =
-                            vec![Effect::SaveConfig(config), Effect::LoadVariables, Effect::LoadHistory];
+                        let mut effects = vec![
+                            Effect::SaveConfig(config),
+                            Effect::LoadVariables,
+                            Effect::LoadHistory,
+                            Effect::LoadSaved,
+                        ];
                         effects.extend(editor.set_data_sources(sources));
                         self.screen = Screen::Editor(Box::new(editor));
                         effects
@@ -644,22 +771,51 @@ impl AppState {
             // Not mid-run, which may be waiting for the variables it would replace.
             (Screen::Editor(ed), Event::RestoreHistory(i)) if !ed.running => {
                 let Some(entry) = ed.history.get(i).cloned() else { return Vec::new() };
-                ed.sql = entry.sql;
-                ed.set_variables(entry.variables);
-                ed.show_variables |= !ed.variables.is_empty();
-                ed.error = None;
-                let mut effects = ed.save_variables();
-                if ed.data_sources.iter().any(|s| s.id == entry.data_source_id) {
-                    ed.selected_source = Some(entry.data_source_id);
-                    effects.extend(ed.load_schema());
-                } else {
-                    ed.error = Some("This query's data source no longer exists; pick another".into());
-                }
-                effects
+                ed.restore(entry.sql, entry.data_source_id, entry.variables)
             }
             (Screen::Editor(ed), Event::ClearHistory) => {
                 ed.history.clear();
                 vec![Effect::SaveHistory(Vec::new())]
+            }
+            (Screen::Editor(ed), Event::SavedLoaded(res)) => {
+                match res {
+                    Ok(loaded) => ed.saved = loaded,
+                    Err(e) => ed.error = Some(format!("Could not load saved queries: {e}")),
+                }
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::SaveQuery) if ed.can_save() => {
+                ed.finish_rename(); // stored below, with the new query
+                let query = SavedQuery::new(
+                    (ed.clock)(),
+                    ed.selected_source.unwrap_or_default(),
+                    &ed.sql,
+                    &ed.variables,
+                );
+                ed.renaming = Some(Renaming { index: 0, name: query.name.clone() });
+                ed.saved.insert(0, query);
+                ed.sidebar_tab = SidebarTab::Saved;
+                ed.show_sidebar = true;
+                ed.store_saved()
+            }
+            (Screen::Editor(ed), Event::RestoreSaved(i)) if !ed.running => {
+                let Some(query) = ed.saved.get(i).cloned() else { return Vec::new() };
+                ed.restore(query.sql, query.data_source_id, query.variables)
+            }
+            (Screen::Editor(ed), Event::DeleteSaved(i)) if i < ed.saved.len() => {
+                ed.renaming = None; // indices shift
+                ed.saved.remove(i);
+                ed.store_saved()
+            }
+            (Screen::Editor(ed), Event::StartRename(i)) if i < ed.saved.len() => {
+                let effects = ed.finish_rename();
+                ed.renaming = Some(Renaming { index: i, name: ed.saved[i].name.clone() });
+                effects
+            }
+            (Screen::Editor(ed), Event::FinishRename) => ed.finish_rename(),
+            (Screen::Editor(ed), Event::CancelRename) => {
+                ed.renaming = None;
+                Vec::new()
             }
             (Screen::Editor(ed), Event::ToggleVariables) => {
                 ed.show_variables = !ed.show_variables;
@@ -730,34 +886,56 @@ impl AppState {
                 match res {
                     Ok(result) => {
                         ed.results_shown += 1;
-                        ed.result =
-                            Some(ResultView { result, id: ed.results_shown, col_widths: None, page: 0 });
+                        ed.result = Some(ResultView::new(result, ed.results_shown, ed.page_size));
                     }
-                    Err(e) => ed.error = Some(e),
+                    Err(e) => ed.fail_query(e),
                 }
                 Vec::new()
             }
             (Screen::Editor(ed), Event::ShowPage(page)) => {
                 if let Some(view) = &mut ed.result {
                     view.page = page.min(view.page_count(ed.page_size) - 1);
+                    view.find(ed.page_size);
                 }
                 Vec::new()
             }
             (Screen::Editor(ed), Event::SetPageSize(size)) if size > 0 => {
                 if let Some(view) = &mut ed.result {
                     view.page = view.page_rows(ed.page_size).start / size;
+                    view.find(size);
                 }
                 ed.page_size = size;
                 Vec::new()
             }
-            (Screen::Editor(ed), Event::CopyPageMarkdown) => match &ed.result {
-                Some(view) => {
-                    let rows = view.page_rows(ed.page_size);
+            (Screen::Editor(ed), Event::SearchResults(text)) => {
+                if let Some(view) = &mut ed.result {
+                    view.search = text;
+                    view.find(ed.page_size);
+                }
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::NextMatch(forward)) => {
+                if let Some(view) = &mut ed.result
+                    && !view.found.hits.is_empty()
+                {
+                    let n = view.found.hits.len();
+                    view.current = if forward { (view.current + 1) % n } else { (view.current + n - 1) % n };
+                }
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::CopyPageMarkdown) => match (&ed.result, &ed.query_error) {
+                (Some(view), _) => {
+                    let rows = &view.found.rows;
                     let n = rows.len();
                     ed.notice = Some(format!("Copied {n} {} as Markdown", plural(n, "row")));
                     vec![Effect::CopyToClipboard(export::markdown_table(&view.result, rows))]
                 }
-                None => Vec::new(),
+                (None, Some(error)) => {
+                    let markdown = export::markdown_error(error);
+                    ed.notice = Some("Copied the error as Markdown".into());
+                    vec![Effect::CopyToClipboard(markdown)]
+                }
+                (None, None) => Vec::new(),
             },
             (Screen::Editor(ed), Event::ExportCsv) => match &ed.result {
                 Some(view) => vec![Effect::SaveCsv {
@@ -868,7 +1046,15 @@ mod tests {
     fn starts_in_editor_and_loads_sources_with_saved_config() {
         let (state, effects) = AppState::new(Some(config()));
         assert!(editor(&state).loading_sources);
-        assert_eq!(effects, [Effect::LoadDataSources(config()), Effect::LoadVariables, Effect::LoadHistory]);
+        assert_eq!(
+            effects,
+            [
+                Effect::LoadDataSources(config()),
+                Effect::LoadVariables,
+                Effect::LoadHistory,
+                Effect::LoadSaved
+            ]
+        );
     }
 
     fn load_schema(id: i64) -> Effect {
@@ -889,7 +1075,13 @@ mod tests {
         let effects = state.update(Event::DataSourcesLoaded(Ok(sources())));
         assert_eq!(
             effects,
-            [Effect::SaveConfig(config()), Effect::LoadVariables, Effect::LoadHistory, load_schema(1)]
+            [
+                Effect::SaveConfig(config()),
+                Effect::LoadVariables,
+                Effect::LoadHistory,
+                Effect::LoadSaved,
+                load_schema(1)
+            ]
         );
         let ed = editor(&state);
         assert_eq!(ed.selected_source, Some(1));
@@ -969,15 +1161,24 @@ mod tests {
     }
 
     #[test]
-    fn query_error_keeps_previous_result() {
+    fn query_error_replaces_result_and_copies_as_markdown() {
         let mut state = connected_editor();
         state.update(Event::Execute);
         state.update(Event::QueryFinished(Ok(result())));
         state.update(Event::Execute);
         state.update(Event::QueryFinished(Err("syntax error".into())));
         let ed = editor(&state);
-        assert_eq!(ed.error.as_deref(), Some("syntax error"));
-        assert!(ed.result.is_some());
+        assert_eq!((ed.query_error.as_deref(), &ed.error), (Some("syntax error"), &None));
+        assert!(ed.result.is_none());
+
+        let effects = state.update(Event::CopyPageMarkdown);
+        assert_eq!(effects, [Effect::CopyToClipboard("```\nsyntax error\n```\n".into())]);
+        assert_eq!(editor(&state).notice.as_deref(), Some("Copied the error as Markdown"));
+
+        state.update(Event::Execute);
+        assert_eq!(editor(&state).query_error, None, "cleared by the next run");
+        state.update(Event::QueryFinished(Ok(result())));
+        assert!(editor(&state).result.is_some());
     }
 
     #[test]
@@ -1116,6 +1317,76 @@ mod tests {
     }
 
     #[test]
+    fn search_shows_matching_rows_and_copies_only_them() {
+        let mut state = connected_editor();
+        state.update(Event::SearchResults("x".into()));
+        state.update(Event::NextMatch(true));
+        assert!(editor(&state).result.is_none(), "no result yet");
+
+        state.update(Event::Execute);
+        let rows =
+            (0..3).map(|i| [("n".to_string(), i.into()), ("label".to_string(), format!("row {i}").into())]);
+        let columns = vec![Column { name: "n".into() }, Column { name: "label".into() }];
+        let result = QueryResult {
+            data: QueryData { columns, rows: rows.map(|r| r.into_iter().collect()).collect() },
+            runtime: 0.1,
+        };
+        state.update(Event::QueryFinished(Ok(result.clone())));
+        let view = |state: &AppState| editor(state).result.as_ref().unwrap().found.rows.clone();
+        assert_eq!(view(&state), [0, 1, 2]);
+
+        state.update(Event::SearchResults("ROW 2".into()));
+        assert_eq!(view(&state), [2]);
+        let effects = state.update(Event::CopyPageMarkdown);
+        assert_eq!(
+            effects,
+            [Effect::CopyToClipboard("| n | label |\n| --- | --- |\n| 2 | row 2 |\n".into())]
+        );
+        let csv = "n,label\r\n0,row 0\r\n1,row 1\r\n2,row 2\r\n";
+        let effects = state.update(Event::ExportCsv);
+        assert_eq!(effects, [Effect::SaveCsv { file_name: "query_result.csv".into(), contents: csv.into() }]);
+
+        state.update(Event::Execute);
+        state.update(Event::QueryFinished(Ok(result)));
+        assert_eq!(view(&state), [0, 1, 2], "reset by a new result");
+        assert_eq!(editor(&state).result.as_ref().unwrap().search, "");
+    }
+
+    #[test]
+    fn search_covers_the_shown_page_and_cycles_through_its_hits() {
+        let mut state = editor_with_result(60);
+        state.update(Event::ShowPage(2));
+        // Rows 50..60 are on the page; "5" is in each, twice in 55.
+        state.update(Event::SearchResults("5".into()));
+        let view = |state: &AppState| {
+            let view = editor(state).result.as_ref().unwrap();
+            let hit = view.current_hit().map(|h| (h.row, h.range.clone()));
+            (view.page, view.found.rows.len(), view.found.hits.len(), view.current, hit)
+        };
+        assert_eq!(view(&state), (2, 10, 11, 0, Some((50, 0..1))), "stays on the page");
+
+        state.update(Event::NextMatch(false));
+        assert_eq!(view(&state), (2, 10, 11, 10, Some((59, 0..1))), "wraps to the last");
+        state.update(Event::NextMatch(true));
+        assert_eq!(view(&state).3, 0, "and back");
+        for _ in 0..6 {
+            state.update(Event::NextMatch(true));
+        }
+        assert_eq!(view(&state).4, Some((55, 1..2)), "second hit in the same cell");
+        let v = editor(&state).result.as_ref().unwrap();
+        assert_eq!((v.hits_in(55, 0).0, v.hits_in(55, 0).1.len()), (5, 2));
+        assert_eq!(v.hits_in(56, 1).1, []);
+
+        // Another page is searched when shown: 5 and 15 in 0..25, then only 5 in 0..10.
+        state.update(Event::ShowPage(0));
+        assert_eq!(view(&state), (0, 2, 2, 0, Some((5, 0..1))));
+        assert_eq!(page_rows(&state), 0..25, "pages are over the whole result");
+        state.update(Event::SetPageSize(10));
+        assert_eq!(view(&state), (0, 1, 1, 0, Some((5, 0..1))));
+        assert_eq!(editor(&state).result.as_ref().unwrap().page_count(10), 6);
+    }
+
+    #[test]
     fn exports_whole_result_as_csv() {
         let mut state = connected_editor();
         assert!(state.update(Event::ExportCsv).is_empty(), "no result yet");
@@ -1229,7 +1500,7 @@ mod tests {
         let mut state = editor_with_vars(vec![], "SELECT {{ nope }}");
         assert!(run(&mut state).is_empty());
         let ed = editor(&state);
-        assert_eq!(ed.error.as_deref(), Some("Unknown variable {{ nope }}: add it in Variables"));
+        assert_eq!(ed.query_error.as_deref(), Some("Unknown variable {{ nope }}: add it in Variables"));
         assert!(!ed.running);
     }
 
@@ -1271,7 +1542,7 @@ mod tests {
         let vars = vec![query_var("a", 1, "select {{ b }}"), query_var("b", 1, "select {{a}}")];
         let mut state = editor_with_vars(vars, "SELECT {{ a }}");
         assert!(run(&mut state).is_empty());
-        assert_eq!(editor(&state).error.as_deref(), Some("Variable a refers to itself"));
+        assert_eq!(editor(&state).query_error.as_deref(), Some("Variable a refers to itself"));
         assert!(!editor(&state).running);
     }
 
@@ -1283,7 +1554,7 @@ mod tests {
         let effects = state.update(Event::VariableFinished { id: 1, result: Err("syntax error".into()) });
         assert!(effects.is_empty());
         let ed = editor(&state);
-        assert_eq!(ed.error.as_deref(), Some("Variable a: syntax error"));
+        assert_eq!(ed.query_error.as_deref(), Some("Variable a: syntax error"));
         assert!(!ed.running);
 
         // b is still running; the retry waits for it instead of starting it again.
@@ -1421,5 +1692,94 @@ mod tests {
         assert_eq!(editor(&state).sidebar_tab, SidebarTab::Schema);
         assert_eq!(state.update(Event::ClearHistory), [Effect::SaveHistory(vec![])]);
         assert!(editor(&state).history.is_empty());
+    }
+
+    #[test]
+    fn saves_the_query_and_starts_renaming_it() {
+        let mut state = editor_with_vars(vec![value_var("n", "1")], "-- Paying\nSELECT {{ n }}");
+        edit(&mut state, |ed| {
+            ed.clock = || 9;
+            ed.selected_source = Some(2);
+            ed.sidebar_tab = SidebarTab::Schema;
+            ed.show_sidebar = false;
+        });
+        let effects = state.update(Event::SaveQuery);
+        let ed = editor(&state);
+        assert_eq!(ed.saved, [SavedQuery::new(9, 2, "-- Paying\nSELECT {{ n }}", &[value_var("n", "1")])]);
+        assert_eq!(effects, [Effect::StoreSaved(ed.saved.clone())]);
+        assert_eq!(ed.renaming, Some(Renaming { index: 0, name: "SELECT {{ n }}".into() }));
+        assert_eq!((ed.sidebar_tab, ed.show_sidebar), (SidebarTab::Saved, true), "shows the list");
+
+        // No limit, newest first; saving again finishes the rename in progress.
+        edit(&mut state, |ed| ed.renaming.as_mut().unwrap().name = "Paying users".into());
+        for i in 0..30 {
+            edit(&mut state, |ed| ed.sql = format!("select {i}"));
+            state.update(Event::SaveQuery);
+        }
+        let ed = editor(&state);
+        assert_eq!(ed.saved.len(), 31);
+        assert_eq!((ed.saved[0].name.as_str(), ed.saved[30].name.as_str()), ("select 29", "Paying users"));
+
+        edit(&mut state, |ed| ed.sql = "  ".into());
+        assert!(state.update(Event::SaveQuery).is_empty(), "nothing to save");
+    }
+
+    #[test]
+    fn renames_saved_queries() {
+        let mut state = connected_editor();
+        let saved = vec![SavedQuery::new(0, 1, "select 1", &[]), SavedQuery::new(0, 1, "select 2", &[])];
+        state.update(Event::SavedLoaded(Ok(saved)));
+        assert!(state.update(Event::StartRename(5)).is_empty(), "no such query");
+        assert_eq!(editor(&state).renaming, None);
+
+        state.update(Event::StartRename(1));
+        assert_eq!(editor(&state).renaming, Some(Renaming { index: 1, name: "select 2".into() }));
+        edit(&mut state, |ed| ed.renaming.as_mut().unwrap().name = " Totals ".into());
+        let effects = state.update(Event::FinishRename);
+        let ed = editor(&state);
+        assert_eq!(ed.saved[1].name, "Totals");
+        assert_eq!(effects, [Effect::StoreSaved(ed.saved.clone())]);
+        assert_eq!(ed.renaming, None);
+
+        state.update(Event::StartRename(0));
+        edit(&mut state, |ed| ed.renaming.as_mut().unwrap().name = "Ignored".into());
+        assert!(state.update(Event::CancelRename).is_empty());
+        state.update(Event::StartRename(0));
+        edit(&mut state, |ed| ed.renaming.as_mut().unwrap().name = String::new());
+        assert!(state.update(Event::FinishRename).is_empty(), "blank keeps the name");
+        assert_eq!(editor(&state).saved[0].name, "select 1");
+
+        // Starting another rename keeps the one in progress.
+        state.update(Event::StartRename(0));
+        edit(&mut state, |ed| ed.renaming.as_mut().unwrap().name = "First".into());
+        assert_eq!(state.update(Event::StartRename(1)).len(), 1);
+        assert_eq!(editor(&state).saved[0].name, "First");
+    }
+
+    #[test]
+    fn restores_and_deletes_saved_queries() {
+        let mut state = connected_editor();
+        let saved = vec![
+            SavedQuery::new(0, 2, "select {{ n }}", &[value_var("n", "1")]),
+            SavedQuery::new(0, 1, "select 2", &[]),
+        ];
+        state.update(Event::SavedLoaded(Ok(saved)));
+        let effects = state.update(Event::RestoreSaved(0));
+        let ed = editor(&state);
+        assert_eq!((ed.sql.as_str(), ed.selected_source), ("select {{ n }}", Some(2)));
+        assert_eq!(ed.variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["n"]);
+        assert_eq!(effects, [Effect::SaveVariables(ed.variables.clone()), load_schema(2)]);
+        assert!(state.update(Event::RestoreSaved(5)).is_empty(), "no such query");
+
+        state.update(Event::StartRename(1));
+        let effects = state.update(Event::DeleteSaved(0));
+        let ed = editor(&state);
+        assert_eq!(ed.saved.iter().map(|q| q.sql.as_str()).collect::<Vec<_>>(), ["select 2"]);
+        assert_eq!(effects, [Effect::StoreSaved(ed.saved.clone())]);
+        assert_eq!(ed.renaming, None, "its index moved");
+        assert!(state.update(Event::DeleteSaved(1)).is_empty(), "no such query");
+
+        state.update(Event::SavedLoaded(Err("bad json".into())));
+        assert_eq!(editor(&state).error.as_deref(), Some("Could not load saved queries: bad json"));
     }
 }

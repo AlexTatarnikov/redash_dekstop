@@ -125,6 +125,15 @@ impl RedashApp {
                     self.dispatch(ctx, Event::ConfigError(format!("Could not save history: {e}")));
                 }
             }
+            Effect::LoadSaved => {
+                let loaded = self.store.load_saved().map_err(|e| e.to_string());
+                self.dispatch(ctx, Event::SavedLoaded(loaded));
+            }
+            Effect::StoreSaved(saved) => {
+                if let Err(e) = self.store.save_saved(&saved) {
+                    self.dispatch(ctx, Event::ConfigError(format!("Could not save queries: {e}")));
+                }
+            }
             Effect::RunVariable { config, id, data_source_id, sql } => {
                 self.spawn(ctx, move || Event::VariableFinished {
                     id,

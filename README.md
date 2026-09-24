@@ -19,6 +19,9 @@ run it, and browse, copy or export the results without opening a browser.
   (handy for `IN (...)`).
 - **Execution history**: the last 20 runs, each with its SQL, data source and
   variables. Click one to restore it.
+- **Saved queries**: keep a query with its data source and variables (**Save** or
+  `Cmd/Ctrl + S`), as many as you like. Give them names to find them again; right-click
+  one to rename or delete it.
 - **Schema browser**: tables, columns and types of the selected data source, with a
   filter and a Refresh button.
 - Light and dark themes that follow the OS.
@@ -43,15 +46,16 @@ To build it yourself, see [Development](#development).
    the API key.
 3. Pick a data source, write a query and press **Execute**.
 
-Settings, variables and history are stored in
+Settings, variables, history and saved queries are stored in
 `~/Library/Application Support/redash-desktop/` (`config.json`, `variables.json`,
-`history.json`). The API key is stored there in plain text.
+`history.json`, `saved.json`). The API key is stored there in plain text.
 
 ### Keyboard shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Cmd/Ctrl + Enter` | Execute the query |
+| `Cmd/Ctrl + S` | Save the query |
 | `Cmd/Ctrl + /` | Comment or uncomment the selected lines |
 | `Ctrl + Space` | Open autocompletion |
 | `↑` / `↓`, `Enter` / `Tab`, `Esc` | Navigate, accept or close suggestions |
