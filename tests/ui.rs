@@ -570,12 +570,11 @@ fn schema_panel_lists_tables_and_filters_columns() {
     assert!(h.query_by_label("order_id").is_none(), "only matching columns");
 
     h.get_by_label("Refresh").click();
-    wait_for(
-        &mut h,
-        "refreshed schema",
-        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty()),
-    );
-    assert!(mock.requests().contains(&"GET /api/data_sources/1/schema?refresh=true".to_string()));
+    let refreshed = "GET /api/data_sources/1/schema?refresh=true".to_string();
+    wait_for(&mut h, "refreshed schema", |h| {
+        mock.requests().contains(&refreshed)
+            && matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty())
+    });
 
     // The panel follows the toolbar's data source; source 2 loads through a job.
     let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };

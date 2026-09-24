@@ -1,0 +1,3 @@
+# Snapshot comparison. The CI runner's GPU rounds anti-aliased edges slightly
+# differently from a local Mac, so allow a handful of pixels over the threshold.
+max_failed_pixels = 20

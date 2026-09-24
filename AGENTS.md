@@ -94,6 +94,7 @@ flow in `tests/ui.rs`.
   selected text as its *value*, not its label: `h.get_by(|n| n.value().as_deref() == Some("…"))`.
 - Snapshots must be deterministic: `tests/ui.rs::snapshot` hides the cursor and masks the
   mock's random `http://127.0.0.1:<port>`. Mask anything else that varies per run.
+  `kittest.toml` allows a few pixels of GPU rounding difference between local Macs and CI.
 - Never touch the real settings file in tests; use `ConfigStore::memory`.
 - `{{ name }}` in SQL is expanded client-side from the user's variables before sending;
   an unknown name is an error. UI tests that run `SAMPLE_SQL` need `tests/ui.rs::store`,
