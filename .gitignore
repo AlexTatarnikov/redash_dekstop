@@ -4,3 +4,8 @@ tests/snapshots/*.new.png
 tests/snapshots/*.diff.png
 tests/snapshots/*.old.png
 .claude/settings.local.json
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
