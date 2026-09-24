@@ -105,6 +105,30 @@ impl RedashApp {
                 }),
                 None => self.dispatch(ctx, Event::CsvSaved(Ok(None))),
             },
+            Effect::LoadVariables => {
+                let loaded = self.store.load_variables().map_err(|e| e.to_string());
+                self.dispatch(ctx, Event::VariablesLoaded(loaded));
+            }
+            Effect::SaveVariables(variables) => {
+                if let Err(e) = self.store.save_variables(&variables) {
+                    self.dispatch(ctx, Event::ConfigError(format!("Could not save variables: {e}")));
+                }
+            }
+            Effect::LoadHistory => {
+                let loaded = self.store.load_history().map_err(|e| e.to_string());
+                self.dispatch(ctx, Event::HistoryLoaded(loaded));
+            }
+            Effect::SaveHistory(history) => {
+                if let Err(e) = self.store.save_history(&history) {
+                    self.dispatch(ctx, Event::ConfigError(format!("Could not save history: {e}")));
+                }
+            }
+            Effect::RunVariable { config, id, data_source_id, sql } => {
+                self.spawn(ctx, move || Event::VariableFinished {
+                    id,
+                    result: Client::new(&config).execute(data_source_id, &sql).map_err(|e| e.to_string()),
+                })
+            }
         }
     }
 

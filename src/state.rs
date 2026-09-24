@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use crate::api::{DataSource, QueryResult, Table};
 use crate::config::Config;
 use crate::export;
+use crate::history::{self, Entry};
+use crate::vars::{self, Definition, Run, Variable};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -29,6 +31,20 @@ pub enum Event {
     CopyPageMarkdown,
     /// Save the whole result as a CSV file chosen by the user.
     ExportCsv,
+    /// Show or hide the variables panel.
+    ToggleVariables,
+    AddVariable(VariableKind),
+    /// Remove the variable with this id.
+    RemoveVariable(u64),
+    /// A variable's name or definition was edited in place by the UI.
+    VariablesEdited,
+    /// Rerun this query variable (and any variables it needs that have no value).
+    RunVariable(u64),
+    /// Show or hide the history panel.
+    ToggleHistory,
+    /// Put this history entry's SQL, data source and variables back in the editor.
+    RestoreHistory(usize),
+    ClearHistory,
     // Results of effects, delivered by the runtime.
     DataSourcesLoaded(Result<Vec<DataSource>, String>),
     QueryFinished(Result<QueryResult, String>),
@@ -39,6 +55,18 @@ pub enum Event {
     ConfigError(String),
     /// The CSV file was written; `Ok(None)` when the user cancelled the dialog.
     CsvSaved(Result<Option<PathBuf>, String>),
+    VariablesLoaded(Result<Vec<Variable>, String>),
+    HistoryLoaded(Result<Vec<Entry>, String>),
+    VariableFinished {
+        id: u64,
+        result: Result<QueryResult, String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableKind {
+    Value,
+    Query,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +94,27 @@ pub enum Effect {
         file_name: String,
         contents: String,
     },
+    /// Read saved variables. Answered by [`Event::VariablesLoaded`].
+    LoadVariables,
+    SaveVariables(Vec<Variable>),
+    /// Read saved history. Answered by [`Event::HistoryLoaded`].
+    LoadHistory,
+    SaveHistory(Vec<Entry>),
+    /// Run a query variable's SQL (variables already substituted). Answered by
+    /// [`Event::VariableFinished`].
+    RunVariable {
+        config: Config,
+        id: u64,
+        data_source_id: i64,
+        sql: String,
+    },
+}
+
+/// What a run is for; it waits until the variables it uses have values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Query,
+    Variable(u64),
 }
 
 /// A data source's tables and columns, for autocompletion.
@@ -120,6 +169,17 @@ pub struct EditorState {
     pub schemas: HashMap<i64, Schema>,
     /// Counts results so each one gets fresh table state in the UI.
     results_shown: u64,
+    /// Referenced in SQL as `{{ name }}`; see `vars.rs`.
+    pub variables: Vec<Variable>,
+    pub show_variables: bool,
+    next_variable_id: u64,
+    /// The run waiting for variables; `running` is set meanwhile.
+    pending: Option<Target>,
+    /// Snapshots of past runs, newest first; see `history.rs`.
+    pub history: Vec<Entry>,
+    pub show_history: bool,
+    /// The current Unix time in seconds; replaced in tests.
+    pub clock: fn() -> u64,
 }
 
 impl EditorState {
@@ -137,6 +197,13 @@ impl EditorState {
             page_size: PAGE_SIZES[0],
             schemas: HashMap::new(),
             results_shown: 0,
+            variables: Vec::new(),
+            show_variables: false,
+            next_variable_id: 0,
+            pending: None,
+            history: Vec::new(),
+            show_history: true,
+            clock: history::now,
         }
     }
 
@@ -150,6 +217,158 @@ impl EditorState {
             Some(Schema::Loaded(tables)) => tables,
             _ => &[],
         }
+    }
+
+    /// Whether a query variable can be run (or a variable removed) now.
+    pub fn can_run_variable(&self) -> bool {
+        !self.running
+    }
+
+    fn save_variables(&self) -> Vec<Effect> {
+        vec![Effect::SaveVariables(self.variables.clone())]
+    }
+
+    /// Records the query about to run in the history.
+    fn record_history(&mut self) -> Effect {
+        let entry =
+            Entry::new((self.clock)(), self.selected_source.unwrap_or_default(), &self.sql, &self.variables);
+        history::record(&mut self.history, entry);
+        Effect::SaveHistory(self.history.clone())
+    }
+
+    fn set_variables(&mut self, variables: Vec<Variable>) {
+        self.variables.clear();
+        for var in variables {
+            self.add_variable(var.name, var.def);
+        }
+    }
+
+    fn add_variable(&mut self, name: String, def: Definition) {
+        self.next_variable_id += 1;
+        self.variables.push(Variable { id: self.next_variable_id, name, def, run: None });
+    }
+
+    /// Starts `target` once the variables it uses have values; see [`Self::advance`].
+    fn start(&mut self, target: Target) -> Vec<Effect> {
+        self.running = true;
+        self.error = None;
+        self.notice = None;
+        // Failed variables get another try.
+        for var in &mut self.variables {
+            if matches!(var.run, Some(Run::Failed(_))) {
+                var.run = None;
+            }
+        }
+        self.pending = Some(target);
+        self.advance()
+    }
+
+    /// Moves the pending run forward: starts the variable queries it still needs
+    /// (in parallel when independent), and the run itself once they all have values.
+    fn advance(&mut self) -> Vec<Effect> {
+        let Some(target) = self.pending else { return Vec::new() };
+        let mut effects = Vec::new();
+        let outcome = match target {
+            Target::Query => {
+                let sql = self.sql.clone();
+                self.expand(&sql, &mut Vec::new(), &mut effects)
+            }
+            Target::Variable(id) => match self.variables.iter().find(|v| v.id == id) {
+                Some(var) => {
+                    let name = var.name.clone();
+                    self.value(&name, &mut Vec::new(), &mut effects)
+                }
+                None => Err("The variable was removed".into()),
+            },
+        };
+        match outcome {
+            Ok(None) => {}
+            Ok(Some(sql)) => {
+                self.pending = None;
+                match target {
+                    Target::Query => effects.push(Effect::Execute {
+                        config: self.config.clone(),
+                        data_source_id: self.selected_source.unwrap_or_default(),
+                        sql,
+                    }),
+                    Target::Variable(_) => self.running = false,
+                }
+            }
+            Err(e) => {
+                self.pending = None;
+                self.running = false;
+                self.error = Some(e);
+            }
+        }
+        effects
+    }
+
+    /// `sql` with its variables substituted, or `None` while some are still
+    /// running. Starts the runs it needs, adding them to `effects`.
+    /// `stack` holds the variables being resolved, to catch cycles.
+    fn expand(
+        &mut self,
+        sql: &str,
+        stack: &mut Vec<String>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<Option<String>, String> {
+        let mut values = HashMap::new();
+        let mut waiting = false;
+        for (_, name) in vars::references(sql) {
+            if values.contains_key(name) {
+                continue;
+            }
+            match self.value(name, stack, effects)? {
+                Some(value) => {
+                    values.insert(name.to_string(), value);
+                }
+                None => waiting = true,
+            }
+        }
+        Ok((!waiting).then(|| vars::substitute(sql, |name| values.get(name).cloned().unwrap_or_default())))
+    }
+
+    /// The value of variable `name`, or `None` while its query runs (starting it if needed).
+    fn value(
+        &mut self,
+        name: &str,
+        stack: &mut Vec<String>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<Option<String>, String> {
+        let Some(i) = self.variables.iter().position(|v| v.name == name) else {
+            return Err(format!("Unknown variable {{{{ {name} }}}}: add it in Variables"));
+        };
+        let var = &self.variables[i];
+        let source = match &var.def {
+            Definition::Value { value } => return Ok(Some(value.clone())),
+            Definition::Query { data_source_id, sql } => (*data_source_id, sql.clone()),
+        };
+        if let Some(value) = var.fresh_value() {
+            return Ok(Some(value.to_string()));
+        }
+        match &var.run {
+            // Once it finishes, a stale result is rerun.
+            Some(Run::Running { .. }) => return Ok(None),
+            Some(Run::Failed(e)) => return Err(format!("Variable {name}: {e}")),
+            Some(Run::Done { .. }) | None => {}
+        }
+        if stack.iter().any(|n| n == name) {
+            return Err(format!("Variable {name} refers to itself"));
+        }
+        let id = var.id;
+        stack.push(name.to_string());
+        let sql = self.expand(&source.1, stack, effects);
+        stack.pop();
+        if let Some(sql) = sql? {
+            self.variables[i].run = Some(Run::Running { ran: source.clone() });
+            effects.push(Effect::RunVariable {
+                config: self.config.clone(),
+                id,
+                data_source_id: source.0,
+                sql,
+            });
+        }
+        Ok(None)
     }
 
     fn set_data_sources(&mut self, sources: Vec<DataSource>) -> Vec<Effect> {
@@ -300,7 +519,9 @@ impl AppState {
             Some(config) => {
                 let mut editor = EditorState::new(config.clone());
                 editor.loading_sources = true;
-                (Self { screen: Screen::Editor(Box::new(editor)) }, vec![Effect::LoadDataSources(config)])
+                let effects =
+                    vec![Effect::LoadDataSources(config), Effect::LoadVariables, Effect::LoadHistory];
+                (Self { screen: Screen::Editor(Box::new(editor)) }, effects)
             }
             None => (Self { screen: Screen::Setup(SetupState::default()) }, Vec::new()),
         }
@@ -320,7 +541,8 @@ impl AppState {
                     Ok(sources) => {
                         let config = setup.config();
                         let mut editor = EditorState::new(config.clone());
-                        let mut effects = vec![Effect::SaveConfig(config)];
+                        let mut effects =
+                            vec![Effect::SaveConfig(config), Effect::LoadVariables, Effect::LoadHistory];
                         effects.extend(editor.set_data_sources(sources));
                         self.screen = Screen::Editor(Box::new(editor));
                         effects
@@ -337,15 +559,97 @@ impl AppState {
             }
 
             (Screen::Editor(ed), Event::Execute) if ed.can_execute() => {
-                ed.running = true;
-                ed.error = None;
-                ed.notice = None;
-                vec![Effect::Execute {
-                    config: ed.config.clone(),
-                    data_source_id: ed.selected_source.unwrap_or_default(),
-                    sql: ed.sql.clone(),
-                }]
+                let save = ed.record_history();
+                let mut effects = ed.start(Target::Query);
+                effects.push(save);
+                effects
             }
+            (Screen::Editor(ed), Event::RunVariable(id)) if ed.can_run_variable() => {
+                let Some(var) = ed.variables.iter_mut().find(|v| v.id == id && v.source().is_some()) else {
+                    return Vec::new();
+                };
+                var.run = None;
+                ed.start(Target::Variable(id))
+            }
+            (Screen::Editor(ed), Event::VariableFinished { id, result }) => {
+                let Some(var) = ed.variables.iter_mut().find(|v| v.id == id) else { return Vec::new() };
+                let Some(Run::Running { ran }) = var.run.take() else { return Vec::new() };
+                var.run = Some(match result {
+                    Ok(r) => Run::Done { ran, value: vars::value_of(&r), rows: r.data.rows.len() },
+                    Err(e) => Run::Failed(e),
+                });
+                ed.advance()
+            }
+            (Screen::Editor(ed), Event::VariablesLoaded(res)) => {
+                match res {
+                    Ok(loaded) => {
+                        ed.set_variables(loaded);
+                        ed.show_variables = !ed.variables.is_empty();
+                    }
+                    Err(e) => ed.error = Some(format!("Could not load variables: {e}")),
+                }
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::HistoryLoaded(res)) => {
+                match res {
+                    Ok(loaded) => {
+                        ed.history = loaded;
+                        ed.history.truncate(history::LIMIT);
+                    }
+                    Err(e) => ed.error = Some(format!("Could not load history: {e}")),
+                }
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::ToggleHistory) => {
+                ed.show_history = !ed.show_history;
+                Vec::new()
+            }
+            // Not mid-run, which may be waiting for the variables it would replace.
+            (Screen::Editor(ed), Event::RestoreHistory(i)) if !ed.running => {
+                let Some(entry) = ed.history.get(i).cloned() else { return Vec::new() };
+                ed.sql = entry.sql;
+                ed.set_variables(entry.variables);
+                ed.show_variables |= !ed.variables.is_empty();
+                ed.error = None;
+                let mut effects = ed.save_variables();
+                if ed.data_sources.iter().any(|s| s.id == entry.data_source_id) {
+                    ed.selected_source = Some(entry.data_source_id);
+                    effects.extend(ed.load_schema());
+                } else {
+                    ed.error = Some("This query's data source no longer exists; pick another".into());
+                }
+                effects
+            }
+            (Screen::Editor(ed), Event::ClearHistory) => {
+                ed.history.clear();
+                vec![Effect::SaveHistory(Vec::new())]
+            }
+            (Screen::Editor(ed), Event::ToggleVariables) => {
+                ed.show_variables = !ed.show_variables;
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::AddVariable(kind)) => {
+                let name = (1..)
+                    .map(|n| format!("var{n}"))
+                    .find(|name| ed.variables.iter().all(|v| &v.name != name))
+                    .unwrap_or_default();
+                let def = match kind {
+                    VariableKind::Value => Definition::Value { value: String::new() },
+                    VariableKind::Query => Definition::Query {
+                        data_source_id: ed.selected_source.unwrap_or_default(),
+                        sql: String::new(),
+                    },
+                };
+                ed.add_variable(name, def);
+                ed.show_variables = true;
+                ed.save_variables()
+            }
+            // Not mid-run, which may be waiting for it.
+            (Screen::Editor(ed), Event::RemoveVariable(id)) if ed.can_run_variable() => {
+                ed.variables.retain(|v| v.id != id);
+                ed.save_variables()
+            }
+            (Screen::Editor(ed), Event::VariablesEdited) => ed.save_variables(),
             (Screen::Editor(ed), Event::ReloadDataSources) if !ed.loading_sources => {
                 ed.loading_sources = true;
                 ed.error = None;
@@ -528,7 +832,7 @@ mod tests {
     fn starts_in_editor_and_loads_sources_with_saved_config() {
         let (state, effects) = AppState::new(Some(config()));
         assert!(editor(&state).loading_sources);
-        assert_eq!(effects, [Effect::LoadDataSources(config())]);
+        assert_eq!(effects, [Effect::LoadDataSources(config()), Effect::LoadVariables, Effect::LoadHistory]);
     }
 
     fn load_schema(id: i64) -> Effect {
@@ -547,7 +851,10 @@ mod tests {
         assert!(state.update(Event::Connect).is_empty(), "no double connect");
 
         let effects = state.update(Event::DataSourcesLoaded(Ok(sources())));
-        assert_eq!(effects, [Effect::SaveConfig(config()), load_schema(1)]);
+        assert_eq!(
+            effects,
+            [Effect::SaveConfig(config()), Effect::LoadVariables, Effect::LoadHistory, load_schema(1)]
+        );
         let ed = editor(&state);
         assert_eq!(ed.selected_source, Some(1));
         assert_eq!(ed.data_sources.len(), 2);
@@ -581,10 +888,15 @@ mod tests {
             ed.selected_source = Some(2);
             ed.sql = "select 42".into();
         }
+        edit(&mut state, |ed| ed.clock = || 1000);
         let effects = state.update(Event::Execute);
+        let recorded = Entry::new(1000, 2, "select 42", &[]);
         assert_eq!(
             effects,
-            [Effect::Execute { config: config(), data_source_id: 2, sql: "select 42".into() }]
+            [
+                Effect::Execute { config: config(), data_source_id: 2, sql: "select 42".into() },
+                Effect::SaveHistory(vec![recorded])
+            ]
         );
         assert!(state.update(Event::Execute).is_empty(), "already running");
 
@@ -804,5 +1116,255 @@ mod tests {
     #[test]
     fn toggle_comment_on_empty_text() {
         assert_eq!(toggle_line_comment("", 0..0), ("-- ".to_string(), 3..3));
+    }
+
+    fn edit(state: &mut AppState, f: impl FnOnce(&mut EditorState)) {
+        if let Screen::Editor(ed) = &mut state.screen {
+            f(ed);
+        }
+    }
+
+    fn value_var(name: &str, value: &str) -> Variable {
+        Variable { id: 0, name: name.into(), def: Definition::Value { value: value.into() }, run: None }
+    }
+
+    fn query_var(name: &str, source: i64, sql: &str) -> Variable {
+        Variable {
+            id: 0,
+            name: name.into(),
+            def: Definition::Query { data_source_id: source, sql: sql.into() },
+            run: None,
+        }
+    }
+
+    /// Connected editor with these variables loaded; ids are 1, 2, … in order.
+    fn editor_with_vars(vars: Vec<Variable>, sql: &str) -> AppState {
+        let mut state = connected_editor();
+        state.update(Event::VariablesLoaded(Ok(vars)));
+        edit(&mut state, |ed| ed.sql = sql.into());
+        state
+    }
+
+    /// Executes the query, leaving out the history save.
+    fn run(state: &mut AppState) -> Vec<Effect> {
+        let mut effects = state.update(Event::Execute);
+        effects.retain(|e| !matches!(e, Effect::SaveHistory(_)));
+        effects
+    }
+
+    fn execute(source: i64, sql: &str) -> Effect {
+        Effect::Execute { config: config(), data_source_id: source, sql: sql.into() }
+    }
+
+    fn run_var(id: u64, source: i64, sql: &str) -> Effect {
+        Effect::RunVariable { config: config(), id, data_source_id: source, sql: sql.into() }
+    }
+
+    fn ids_result(ids: &[i64]) -> QueryResult {
+        let rows = ids.iter().map(|&i| [("id".to_string(), i.into())].into_iter().collect()).collect();
+        QueryResult { data: QueryData { columns: vec![Column { name: "id".into() }], rows }, runtime: 0.1 }
+    }
+
+    #[test]
+    fn execute_substitutes_value_variables() {
+        let vars = vec![value_var("start", "2026-01-01"), value_var("n", "10")];
+        let mut state = editor_with_vars(vars, "SELECT * WHERE d > '{{ start }}' LIMIT {{n}} -- {{ gone }}");
+        assert!(editor(&state).show_variables, "shown when there are some");
+        assert_eq!(run(&mut state), [execute(1, "SELECT * WHERE d > '2026-01-01' LIMIT 10 -- {{ gone }}")]);
+    }
+
+    #[test]
+    fn unknown_variable_is_an_error() {
+        let mut state = editor_with_vars(vec![], "SELECT {{ nope }}");
+        assert!(run(&mut state).is_empty());
+        let ed = editor(&state);
+        assert_eq!(ed.error.as_deref(), Some("Unknown variable {{ nope }}: add it in Variables"));
+        assert!(!ed.running);
+    }
+
+    #[test]
+    fn query_variables_run_first_then_the_query() {
+        let vars =
+            vec![query_var("ids", 2, "select id"), query_var("other", 1, "select 2"), value_var("n", "5")];
+        let mut state = editor_with_vars(vars, "SELECT {{ids}} + {{ other }}, {{ ids }} LIMIT {{n}}");
+        assert_eq!(run(&mut state), [run_var(1, 2, "select id"), run_var(2, 1, "select 2")]);
+        assert!(editor(&state).running);
+        assert!(state.update(Event::Execute).is_empty(), "already running");
+
+        assert!(state.update(Event::VariableFinished { id: 1, result: Ok(ids_result(&[3, 4])) }).is_empty());
+        let effects = state.update(Event::VariableFinished { id: 2, result: Ok(ids_result(&[])) });
+        assert_eq!(effects, [execute(1, "SELECT 3, 4 + NULL, 3, 4 LIMIT 5")]);
+
+        state.update(Event::QueryFinished(Ok(result())));
+        assert!(!editor(&state).running);
+        // Values are kept until the variable's definition changes.
+        assert_eq!(run(&mut state), [execute(1, "SELECT 3, 4 + NULL, 3, 4 LIMIT 5")]);
+        state.update(Event::QueryFinished(Ok(result())));
+        edit(&mut state, |ed| {
+            ed.variables[0].def = Definition::Query { data_source_id: 2, sql: "select 9".into() }
+        });
+        assert_eq!(run(&mut state), [run_var(1, 2, "select 9")]);
+    }
+
+    #[test]
+    fn variables_can_use_other_variables() {
+        let vars = vec![query_var("users", 1, "select id where d > {{ start }}"), value_var("start", "'x'")];
+        let mut state = editor_with_vars(vars, "SELECT {{ users }}");
+        assert_eq!(run(&mut state), [run_var(1, 1, "select id where d > 'x'")]);
+        let effects = state.update(Event::VariableFinished { id: 1, result: Ok(ids_result(&[7])) });
+        assert_eq!(effects, [execute(1, "SELECT 7")]);
+    }
+
+    #[test]
+    fn variable_cycles_are_errors() {
+        let vars = vec![query_var("a", 1, "select {{ b }}"), query_var("b", 1, "select {{a}}")];
+        let mut state = editor_with_vars(vars, "SELECT {{ a }}");
+        assert!(run(&mut state).is_empty());
+        assert_eq!(editor(&state).error.as_deref(), Some("Variable a refers to itself"));
+        assert!(!editor(&state).running);
+    }
+
+    #[test]
+    fn failed_variable_stops_the_run_and_is_retried_next_time() {
+        let vars = vec![query_var("a", 1, "select fail"), query_var("b", 1, "select 2")];
+        let mut state = editor_with_vars(vars, "SELECT {{ a }}, {{ b }}");
+        state.update(Event::Execute);
+        let effects = state.update(Event::VariableFinished { id: 1, result: Err("syntax error".into()) });
+        assert!(effects.is_empty());
+        let ed = editor(&state);
+        assert_eq!(ed.error.as_deref(), Some("Variable a: syntax error"));
+        assert!(!ed.running);
+
+        // b is still running; the retry waits for it instead of starting it again.
+        assert_eq!(run(&mut state), [run_var(1, 1, "select fail")]);
+        assert!(state.update(Event::VariableFinished { id: 2, result: Ok(ids_result(&[2])) }).is_empty());
+        let effects = state.update(Event::VariableFinished { id: 1, result: Ok(ids_result(&[1])) });
+        assert_eq!(effects, [execute(1, "SELECT 1, 2")]);
+    }
+
+    #[test]
+    fn run_variable_refreshes_its_value() {
+        let vars = vec![query_var("ids", 2, "select {{ n }}"), value_var("n", "1")];
+        let mut state = editor_with_vars(vars, "SELECT 1");
+        assert!(state.update(Event::RunVariable(2)).is_empty(), "plain values don't run");
+        assert_eq!(state.update(Event::RunVariable(1)), [run_var(1, 2, "select 1")]);
+        assert!(editor(&state).running);
+        assert!(state.update(Event::VariableFinished { id: 1, result: Ok(ids_result(&[1])) }).is_empty());
+        let ed = editor(&state);
+        assert!(!ed.running);
+        assert_eq!(ed.variables[0].fresh_value(), Some("1"));
+
+        edit(&mut state, |ed| ed.variables[1].def = Definition::Value { value: "2".into() });
+        assert_eq!(
+            state.update(Event::RunVariable(1)),
+            [run_var(1, 2, "select 2")],
+            "reruns even when fresh"
+        );
+    }
+
+    #[test]
+    fn adds_edits_and_removes_variables() {
+        let mut state = editor_with_vars(vec![value_var("var1", "")], "SELECT 1");
+        edit(&mut state, |ed| ed.selected_source = Some(2));
+        let effects = state.update(Event::AddVariable(VariableKind::Query));
+        let added = query_var("var2", 2, "");
+        let ed = editor(&state);
+        assert_eq!((ed.variables[1].name.as_str(), &ed.variables[1].def), ("var2", &added.def));
+        assert_eq!(effects, [Effect::SaveVariables(ed.variables.clone())]);
+
+        assert_eq!(
+            state.update(Event::VariablesEdited),
+            [Effect::SaveVariables(editor(&state).variables.clone())]
+        );
+        state.update(Event::RemoveVariable(1));
+        assert_eq!(editor(&state).variables.iter().map(|v| v.id).collect::<Vec<_>>(), [2]);
+
+        state.update(Event::ToggleVariables);
+        assert!(!editor(&state).show_variables);
+    }
+
+    #[test]
+    fn no_removing_variables_mid_run() {
+        let mut state = editor_with_vars(vec![query_var("a", 1, "select 1")], "SELECT {{ a }}");
+        state.update(Event::Execute);
+        assert!(state.update(Event::RemoveVariable(1)).is_empty());
+        assert_eq!(editor(&state).variables.len(), 1);
+    }
+
+    #[test]
+    fn each_execution_records_a_snapshot() {
+        let mut state = editor_with_vars(vec![value_var("n", "1")], "SELECT {{ n }}");
+        edit(&mut state, |ed| ed.clock = || 7);
+        run(&mut state);
+        state.update(Event::QueryFinished(Ok(result())));
+        edit(&mut state, |ed| {
+            ed.sql = "SELECT 2".into();
+            ed.selected_source = Some(2);
+            ed.variables[0].def = Definition::Value { value: "2".into() };
+        });
+        let effects = state.update(Event::Execute);
+        let history = &editor(&state).history;
+        assert_eq!(effects.last(), Some(&Effect::SaveHistory(history.clone())));
+        assert_eq!(history.len(), 2);
+        assert_eq!((history[0].sql.as_str(), history[0].data_source_id), ("SELECT 2", 2));
+        assert_eq!(history[1], Entry::new(7, 1, "SELECT {{ n }}", &[value_var("n", "1")]));
+    }
+
+    #[test]
+    fn failed_runs_are_recorded_too() {
+        let mut state = editor_with_vars(vec![], "SELECT {{ nope }}");
+        let effects = state.update(Event::Execute);
+        assert!(matches!(effects.as_slice(), [Effect::SaveHistory(h)] if h.len() == 1));
+    }
+
+    #[test]
+    fn restores_a_snapshot() {
+        let mut state = editor_with_vars(vec![value_var("n", "1")], "SELECT {{ n }}");
+        edit(&mut state, |ed| ed.selected_source = Some(2));
+        run(&mut state);
+        state.update(Event::QueryFinished(Ok(result())));
+        edit(&mut state, |ed| {
+            ed.sql = "other".into();
+            ed.selected_source = Some(1);
+            ed.variables.clear();
+            ed.show_variables = false;
+        });
+
+        let effects = state.update(Event::RestoreHistory(0));
+        let ed = editor(&state);
+        assert_eq!((ed.sql.as_str(), ed.selected_source), ("SELECT {{ n }}", Some(2)));
+        assert_eq!(ed.variables.iter().map(|v| (v.id, v.name.as_str())).collect::<Vec<_>>(), [(2, "n")]);
+        assert!(ed.show_variables);
+        assert_eq!(effects, [Effect::SaveVariables(ed.variables.clone()), load_schema(2)]);
+        assert!(state.update(Event::RestoreHistory(5)).is_empty(), "no such entry");
+    }
+
+    #[test]
+    fn restoring_keeps_source_when_it_is_gone_and_waits_for_runs() {
+        let mut state = connected_editor();
+        edit(&mut state, |ed| ed.history = vec![Entry::new(0, 9, "select 9", &[])]);
+        state.update(Event::RestoreHistory(0));
+        let ed = editor(&state);
+        assert_eq!((ed.sql.as_str(), ed.selected_source), ("select 9", Some(1)));
+        assert!(ed.error.is_some());
+
+        edit(&mut state, |ed| ed.sql = "select 1".into());
+        state.update(Event::Execute);
+        assert!(state.update(Event::RestoreHistory(0)).is_empty(), "not mid-run");
+        assert_eq!(editor(&state).sql, "select 1");
+    }
+
+    #[test]
+    fn loads_toggles_and_clears_history() {
+        let mut state = connected_editor();
+        assert!(editor(&state).show_history, "shown by default");
+        let saved: Vec<Entry> = (0..25).map(|i| Entry::new(i, 1, "select 1", &[])).collect();
+        state.update(Event::HistoryLoaded(Ok(saved)));
+        assert_eq!(editor(&state).history.len(), history::LIMIT);
+
+        state.update(Event::ToggleHistory);
+        assert!(!editor(&state).show_history, "collapsed");
+        assert_eq!(state.update(Event::ClearHistory), [Effect::SaveHistory(vec![])]);
+        assert!(editor(&state).history.is_empty());
     }
 }

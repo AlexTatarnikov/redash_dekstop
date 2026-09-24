@@ -5,9 +5,11 @@ pub mod app;
 pub mod complete;
 pub mod config;
 pub mod export;
+pub mod history;
 pub mod mock;
 pub mod sql;
 pub mod state;
 mod ui;
+pub mod vars;
 
 pub use app::RedashApp;

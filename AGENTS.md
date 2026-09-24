@@ -39,10 +39,14 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/sql.rs` | Pure SQL tokenizer for editor highlighting; colours (GitHub's palette) are `theme::syntax_color`. |
 | `src/complete.rs` | Pure SQL autocompletion: suggestions at the cursor from the schema (aliases, `schema.`, `FROM` context). |
 | `src/ui/completion.rs` | The editor's autocomplete popup: when it opens, its keys (↑/↓, Enter/Tab, Esc, Ctrl+Space), drawing. |
+| `src/vars.rs` | Pure variables: `{{ name }}` references and substitution, a query result as a value (first column as SQL literals). `state.rs` runs the query variables a run needs before it. |
+| `src/ui/variables.rs` | The variables panel (right side): value and query variables, edited in place. |
+| `src/history.rs` | Pure execution history: each Execute records a snapshot (SQL, data source, variable definitions), newest first, last 20; rerunning the newest only updates its time. |
+| `src/ui/history.rs` | The history panel (left, shown by default, collapsed with the toolbar's leftmost icon button): click an entry to restore it. |
 | `src/export.rs` | Pure result export: Markdown table (current page, to the clipboard) and CSV (whole result). |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
-| `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests). |
-| `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour. |
+| `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests); also saves variables to `variables.json` and history to `history.json` next to the config. |
+| `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour; `queries()` returns the SQL it was sent. |
 | `src/main.rs` | Entry point; parses `--mock`. |
 | `tests/ui.rs` | Headless end-to-end tests with `egui_kittest` + snapshots in `tests/snapshots/`. |
 
@@ -72,6 +76,7 @@ flow in `tests/ui.rs`.
   glyphs already used in the UI (`▶`, `…`), and check the snapshot.
 - Styling goes through `ui/theme.rs`: no hard-coded colours or font sizes in screens. Use
   `theme::primary_button` for a screen's main action and `theme::bar_frame` for bars.
+  Icon-only buttons are painted, not glyphs: see `theme::sidebar_toggle` (tests find it by its label).
   Use `ui.button` (not `small_button`) so controls in a row share the 24px height.
   Fonts are embedded from `assets/fonts/` (Inter, SIL Open Font License; keep `Inter-LICENSE.txt`).
   Check both `editor_results.png` (dark) and `editor_results_light.png` after visual changes.
@@ -81,6 +86,9 @@ flow in `tests/ui.rs`.
 - Snapshots must be deterministic: `tests/ui.rs::snapshot` hides the cursor and masks the
   mock's random `http://127.0.0.1:<port>`. Mask anything else that varies per run.
 - Never touch the real settings file in tests; use `ConfigStore::memory`.
+- `{{ name }}` in SQL is expanded client-side from the user's variables before sending;
+  an unknown name is an error. UI tests that run `SAMPLE_SQL` need `tests/ui.rs::store`,
+  which saves the variables it uses.
 - Never open the native save dialog in tests; use `RedashApp::with_save_dialog` to return a temp path.
   Clipboard copies show up in `h.output().platform_output.commands` as `OutputCommand::CopyText`.
 - Errors are shown in the UI, never panics: `unwrap`/`expect`/`panic!` are linted outside tests.

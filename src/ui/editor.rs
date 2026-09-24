@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::{completion, results, theme};
+use super::{completion, history, results, theme, variables};
 use crate::api::normalize_host;
 use crate::sql::tokenize;
 use crate::state::{EditorState, Event, toggle_line_comment};
@@ -13,6 +13,10 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
 
     egui::Panel::top("toolbar").frame(theme::bar_frame(ui.style())).show(ui, |ui| {
         ui.horizontal(|ui| {
+            let tip = if ed.show_history { "Hide history" } else { "Show history" };
+            if theme::sidebar_toggle(ui, ed.show_history, "Toggle history").on_hover_text(tip).clicked() {
+                event = Some(Event::ToggleHistory);
+            }
             let selected = ed
                 .data_sources
                 .iter()
@@ -43,6 +47,10 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             }
             if ed.running {
                 ui.spinner();
+            }
+            let vars = egui::Button::new("Variables").selected(ed.show_variables);
+            if ui.add(vars).on_hover_text("Values and queries to use as {{ name }}").clicked() {
+                event = Some(Event::ToggleVariables);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -77,6 +85,32 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             }
         });
     });
+
+    if ed.show_history {
+        egui::Panel::left("history")
+            .frame(theme::bar_frame(ui.style()))
+            .resizable(true)
+            .default_size(260.0)
+            .min_size(180.0)
+            .show(ui, |ui| {
+                if let Some(e) = history::show(ui, ed) {
+                    event = Some(e);
+                }
+            });
+    }
+
+    if ed.show_variables {
+        egui::Panel::right("variables")
+            .frame(theme::bar_frame(ui.style()))
+            .resizable(true)
+            .default_size(320.0)
+            .min_size(220.0)
+            .show(ui, |ui| {
+                if let Some(e) = variables::show(ui, ed) {
+                    event = Some(e);
+                }
+            });
+    }
 
     egui::Panel::top("sql_editor")
         .frame(theme::bar_frame(ui.style()))
@@ -132,7 +166,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     event
 }
 
-fn highlight(ui: &egui::Ui, sql: &str) -> egui::text::LayoutJob {
+pub(super) fn highlight(ui: &egui::Ui, sql: &str) -> egui::text::LayoutJob {
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let dark = ui.visuals().dark_mode;
     let mut job = egui::text::LayoutJob::default();

@@ -3,7 +3,7 @@
 //! Behaviour (keep AGENTS.md in sync when changing it):
 //! - any request without `Authorization: Key test-key` → 403 "Invalid API key"
 //! - `GET /api/data_sources` → "Analytics DB" (id 1) and "Events" (id 2)
-//! - `POST /api/query_results` → a pending job; SQL containing `fail` makes the job fail,
+//! - `POST /api/query_results` → a pending job (its SQL is kept for `queries()`); SQL containing `fail` makes the job fail,
 //!   and SQL that is only comments fails like Postgres does ("can't execute an empty query")
 //! - `GET /api/jobs/{id}` → finished job pointing at result 9 (or the failure)
 //! - `GET /api/query_results/9` → 40 rows of `id, email, plan, signed_up, mrr`
@@ -24,7 +24,13 @@ pub const MOCK_API_KEY: &str = "test-key";
 
 pub struct MockRedash {
     url: String,
-    requests: Arc<Mutex<Vec<String>>>,
+    log: Arc<Log>,
+}
+
+#[derive(Default)]
+struct Log {
+    requests: Mutex<Vec<String>>,
+    queries: Mutex<Vec<String>>,
 }
 
 impl MockRedash {
@@ -32,15 +38,15 @@ impl MockRedash {
     pub fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let url = format!("http://{}", listener.local_addr()?);
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let log = Arc::clone(&requests);
+        let log = Arc::new(Log::default());
+        let server_log = Arc::clone(&log);
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 // A malformed request only affects that connection.
-                let _ = handle(stream, &log);
+                let _ = handle(stream, &server_log);
             }
         });
-        Ok(Self { url, requests })
+        Ok(Self { url, log })
     }
 
     pub fn url(&self) -> &str {
@@ -49,11 +55,16 @@ impl MockRedash {
 
     /// Requests received so far, as `"METHOD /path"`.
     pub fn requests(&self) -> Vec<String> {
-        self.requests.lock().map(|r| r.clone()).unwrap_or_default()
+        self.log.requests.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// SQL of the queries run so far, in order.
+    pub fn queries(&self) -> Vec<String> {
+        self.log.queries.lock().map(|q| q.clone()).unwrap_or_default()
     }
 }
 
-fn handle(stream: TcpStream, log: &Mutex<Vec<String>>) -> std::io::Result<()> {
+fn handle(stream: TcpStream, log: &Log) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -78,8 +89,15 @@ fn handle(stream: TcpStream, log: &Mutex<Vec<String>>) -> std::io::Result<()> {
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
 
-    if let Ok(mut log) = log.lock() {
-        log.push(format!("{method} {path}"));
+    if let Ok(mut requests) = log.requests.lock() {
+        requests.push(format!("{method} {path}"));
+    }
+    if (method.as_str(), path.as_str()) == ("POST", "/api/query_results")
+        && let Some(sql) =
+            serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["query"].as_str().map(str::to_owned))
+        && let Ok(mut queries) = log.queries.lock()
+    {
+        queries.push(sql);
     }
     let (status, response) = route(&method, &path, &auth, &body);
     let response = response.to_string();

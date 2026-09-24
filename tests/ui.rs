@@ -14,6 +14,7 @@ use redash_desktop::RedashApp;
 use redash_desktop::config::{Config, ConfigStore};
 use redash_desktop::mock::{MOCK_API_KEY, MockRedash};
 use redash_desktop::state::Screen;
+use redash_desktop::vars::{Definition, Variable};
 
 fn harness(app: RedashApp) -> Harness<'static, RedashApp> {
     Harness::builder()
@@ -59,6 +60,25 @@ fn sources_loaded(h: &Harness<'_, RedashApp>) -> bool {
     matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.data_sources.is_empty())
 }
 
+fn variable(name: &str, def: Definition) -> Variable {
+    Variable { id: 0, name: name.into(), def, run: None }
+}
+
+/// Settings in memory, with the variables `SAMPLE_SQL` uses saved.
+fn store(config: Option<Config>) -> ConfigStore {
+    let store = ConfigStore::memory(config);
+    let vars = [
+        variable("start", Definition::Value { value: "2026-09-01".into() }),
+        variable("limit", Definition::Value { value: "100".into() }),
+    ];
+    store.save_variables(&vars).unwrap();
+    store
+}
+
+fn mock_config(mock: &MockRedash) -> Option<Config> {
+    Some(Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() })
+}
+
 /// Exercises every highlight colour in the editor snapshots.
 const SAMPLE_SQL: &str = "-- Paying users\nSELECT id, email, plan, count(*) AS n, 'pro' AS tier\nFROM users\nWHERE mrr > 0 AND signed_up >= '{{ start }}' AND deleted IS NULL\nLIMIT {{ limit }}";
 
@@ -77,7 +97,7 @@ fn type_into(h: &mut Harness<'_, RedashApp>, label: &str, text: &str) {
 #[test]
 fn connect_run_query_and_disconnect() {
     let mock = MockRedash::start().unwrap();
-    let mut h = harness(RedashApp::new(ConfigStore::memory(None)));
+    let mut h = harness(RedashApp::new(store(None)));
     snapshot(&mut h, "setup_empty");
 
     type_into(&mut h, "API host", mock.url());
@@ -124,7 +144,7 @@ fn saved_config_opens_editor_and_shows_query_errors() {
 fn light_theme() {
     let mock = MockRedash::start().unwrap();
     let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
-    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    let mut h = harness(RedashApp::new(store(Some(config))));
     h.ctx.set_theme(egui::Theme::Light);
     wait_for(&mut h, "data sources", sources_loaded);
     set_sql(&mut h, SAMPLE_SQL);
@@ -137,7 +157,7 @@ fn light_theme() {
 fn pages_through_results() {
     let mock = MockRedash::start().unwrap();
     let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
-    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    let mut h = harness(RedashApp::new(store(Some(config))));
     wait_for(&mut h, "data sources", sources_loaded);
     set_sql(&mut h, SAMPLE_SQL);
     h.get_by_label("▶ Execute").click();
@@ -254,7 +274,7 @@ fn copies_page_as_markdown_and_exports_csv() {
     let dir = tempfile::tempdir().unwrap();
     let csv_path = dir.path().join("out.csv");
     let chosen = csv_path.clone();
-    let app = RedashApp::new(ConfigStore::memory(Some(config))).with_save_dialog(move |name| {
+    let app = RedashApp::new(store(Some(config))).with_save_dialog(move |name| {
         assert_eq!(name, "query_result.csv");
         Some(chosen.clone())
     });
@@ -282,4 +302,77 @@ fn copies_page_as_markdown_and_exports_csv() {
     let csv = std::fs::read_to_string(&csv_path).unwrap();
     assert_eq!(csv.lines().count(), 1 + 40, "header and every row");
     assert!(csv.contains("user1@example.com") && csv.contains("user40@example.com"));
+}
+
+#[test]
+fn query_variables_feed_the_query() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(ConfigStore::memory(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    assert!(h.query_by_label("+ Query").is_none(), "hidden without variables");
+
+    h.get_by_label("Variables").click();
+    h.run_steps(2);
+    h.get_by_label("+ Value").click();
+    h.run_steps(2);
+    h.get_by_label("+ Query").click();
+    h.run_steps(2);
+    {
+        let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+        ed.variables[0].name = "n".into();
+        ed.variables[0].def = Definition::Value { value: "5".into() };
+        ed.variables[1].name = "paying".into();
+        ed.variables[1].def =
+            Definition::Query { data_source_id: 2, sql: "SELECT id FROM users LIMIT {{ n }}".into() };
+    }
+    set_sql(&mut h, "SELECT email FROM users\nWHERE id IN ({{ paying }})\nLIMIT {{ n }}");
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label("user1@example.com").is_some());
+
+    let ids = (1..=40).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    assert_eq!(
+        mock.queries(),
+        [
+            "SELECT id FROM users LIMIT 5".to_string(),
+            format!("SELECT email FROM users\nWHERE id IN ({ids})\nLIMIT 5")
+        ]
+    );
+    h.get_by_label_contains("40 rows: 1, 2, 3");
+    snapshot(&mut h, "editor_variables");
+}
+
+#[test]
+fn history_restores_a_past_run() {
+    let mock = MockRedash::start().unwrap();
+    let store = store(mock_config(&mock));
+    let mut h = harness(RedashApp::new(store));
+    wait_for(&mut h, "data sources", sources_loaded);
+    h.get_by_label("Nothing run yet");
+    h.get_by_label("Toggle history").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Nothing run yet").is_none(), "collapsed");
+    h.get_by_label("Toggle history").click();
+    h.run_steps(2);
+    h.get_by_label("Nothing run yet");
+
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+    set_sql(&mut h, "SELECT 1");
+    h.get_by_label("▶ Execute").click();
+    wait_for(
+        &mut h,
+        "second run",
+        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if ed.history.len() == 2 && !ed.running),
+    );
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.variables.clear();
+    h.run_steps(2);
+    snapshot(&mut h, "editor_history");
+
+    h.get_by_label_contains("SELECT id, email").click();
+    h.run_steps(2);
+    let Screen::Editor(ed) = &h.state().state().screen else { panic!("expected editor") };
+    assert_eq!(ed.sql, SAMPLE_SQL);
+    assert_eq!(ed.variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["start", "limit"]);
 }

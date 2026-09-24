@@ -88,6 +88,29 @@ pub fn syntax_color(token: Token, dark: bool) -> Color32 {
     rgb(if dark { dark_hex } else { light })
 }
 
+/// Square toggle with a painted "sidebar" icon (its left pane filled while `open`),
+/// for showing and hiding a side panel. `label` names it for tooltips, screen
+/// readers and tests.
+pub fn sidebar_toggle(ui: &mut egui::Ui, open: bool, label: &str) -> egui::Response {
+    let size = Vec2::splat(ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, open, label));
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, open);
+        let painter = ui.painter();
+        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        let icon = egui::Rect::from_center_size(rect.center(), Vec2::new(14.0, 12.0));
+        let stroke = Stroke::new(1.2, visuals.fg_stroke.color);
+        let pane = egui::Rect::from_min_max(icon.min, egui::pos2(icon.min.x + 5.0, icon.max.y));
+        if open {
+            painter.rect_filled(pane, CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 }, visuals.fg_stroke.color);
+        }
+        painter.rect_stroke(icon, 2.0, stroke, egui::StrokeKind::Inside);
+        painter.vline(pane.max.x, icon.y_range(), stroke);
+    }
+    response
+}
+
 /// Space between the SQL editor's box and its text.
 pub const EDITOR_PADDING: Margin = Margin::symmetric(8, 6);
 
