@@ -1,4 +1,4 @@
-//! The history panel (left, shown by default): past runs of the editor's query, newest first. Clicking one
+//! The history panel (a sidebar tab, shown by default): past runs of the editor's query, newest first. Clicking one
 //! restores its SQL, data source and variables.
 
 use eframe::egui;
@@ -6,16 +6,15 @@ use eframe::egui;
 use crate::history::{self, Entry};
 use crate::state::{EditorState, Event};
 
+/// The panel's header buttons, drawn right to left.
+pub fn actions(ui: &mut egui::Ui, ed: &EditorState) -> Option<Event> {
+    ui.add_enabled(!ed.history.is_empty(), egui::Button::new("Clear"))
+        .clicked()
+        .then_some(Event::ClearHistory)
+}
+
 pub fn show(ui: &mut egui::Ui, ed: &EditorState) -> Option<Event> {
     let mut event = None;
-    ui.horizontal(|ui| {
-        ui.strong("History");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add_enabled(!ed.history.is_empty(), egui::Button::new("Clear")).clicked() {
-                event = Some(Event::ClearHistory);
-            }
-        });
-    });
     ui.weak(format!(
         "Last {} runs. Click one to restore its SQL, data source and variables.",
         history::LIMIT

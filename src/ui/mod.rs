@@ -5,6 +5,7 @@ mod completion;
 mod editor;
 mod history;
 mod results;
+mod schema;
 mod setup;
 pub(crate) mod theme;
 mod variables;

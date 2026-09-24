@@ -200,10 +200,11 @@ impl Client {
         }
     }
 
-    /// Tables and columns of a data source, for autocompletion. Redash answers from
-    /// its cache or starts a refresh job; sources without schema support give none.
-    pub fn schema(&self, data_source_id: i64) -> Result<Vec<Table>> {
-        let resp: Value = self.get(&format!("/api/data_sources/{data_source_id}/schema"))?;
+    /// Tables and columns of a data source. Redash answers from its cache or starts a
+    /// refresh job (always, with `refresh`); sources without schema support give none.
+    pub fn schema(&self, data_source_id: i64, refresh: bool) -> Result<Vec<Table>> {
+        let query = if refresh { "?refresh=true" } else { "" };
+        let resp: Value = self.get(&format!("/api/data_sources/{data_source_id}/schema{query}"))?;
         if let Some(schema) = resp.get("schema") {
             return Ok(serde_json::from_value(schema.clone())?);
         }
@@ -274,11 +275,11 @@ mod tests {
     #[test]
     fn schema_from_cache_or_refresh_job() {
         let mock = MockRedash::start().unwrap();
-        let tables = client(&mock, MOCK_API_KEY).schema(1).unwrap();
+        let tables = client(&mock, MOCK_API_KEY).schema(1, false).unwrap();
         let users = tables.iter().find(|t| t.name == "users").unwrap();
         assert_eq!(users.columns[0], TableColumn { name: "id".into(), kind: Some("integer".into()) });
 
-        let tables = client(&mock, MOCK_API_KEY).schema(2).unwrap();
+        let tables = client(&mock, MOCK_API_KEY).schema(2, false).unwrap();
         assert_eq!(tables[0].name, "events");
         assert_eq!(tables[0].columns[0], TableColumn { name: "event_id".into(), kind: None });
         assert!(
@@ -286,7 +287,11 @@ mod tests {
                 .ends_with(&["GET /api/data_sources/2/schema".into(), "GET /api/jobs/schema".into()])
         );
 
-        assert_eq!(client(&mock, MOCK_API_KEY).schema(3).unwrap(), [], "schema not supported");
+        assert_eq!(client(&mock, MOCK_API_KEY).schema(3, false).unwrap(), [], "schema not supported");
+
+        let tables = client(&mock, MOCK_API_KEY).schema(1, true).unwrap();
+        assert!(tables.iter().any(|t| t.name == "users"));
+        assert_eq!(mock.requests().last().unwrap(), "GET /api/data_sources/1/schema?refresh=true");
     }
 
     #[test]

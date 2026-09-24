@@ -7,6 +7,7 @@ pub mod config;
 pub mod export;
 pub mod history;
 pub mod mock;
+pub mod schema;
 pub mod sql;
 pub mod state;
 mod ui;

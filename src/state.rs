@@ -40,8 +40,12 @@ pub enum Event {
     VariablesEdited,
     /// Rerun this query variable (and any variables it needs that have no value).
     RunVariable(u64),
-    /// Show or hide the history panel.
-    ToggleHistory,
+    /// Show or hide the left sidebar (history and schema).
+    ToggleSidebar,
+    /// Switch the sidebar to this tab, showing it if hidden.
+    ShowSidebarTab(SidebarTab),
+    /// Ask Redash to re-read the selected data source's tables and columns.
+    RefreshSchema,
     /// Put this history entry's SQL, data source and variables back in the editor.
     RestoreHistory(usize),
     ClearHistory,
@@ -80,10 +84,13 @@ pub enum Effect {
         data_source_id: i64,
         sql: String,
     },
-    /// Fetch tables and columns for autocompletion. Answered by [`Event::SchemaLoaded`].
+    /// Fetch tables and columns for autocompletion and the schema panel; `refresh`
+    /// makes Redash re-read them instead of answering from its cache. Answered by
+    /// [`Event::SchemaLoaded`].
     LoadSchema {
         config: Config,
         data_source_id: i64,
+        refresh: bool,
     },
     SaveConfig(Config),
     ClearConfig,
@@ -117,11 +124,20 @@ enum Target {
     Variable(u64),
 }
 
-/// A data source's tables and columns, for autocompletion.
+/// A data source's tables and columns, for autocompletion and the schema panel.
 #[derive(Debug, PartialEq)]
 pub enum Schema {
     Loading,
     Loaded(Vec<Table>),
+    /// Loading failed; selecting the source again retries.
+    Failed(String),
+}
+
+/// What the left sidebar shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    History,
+    Schema,
 }
 
 /// Rows-per-page choices; the first is the default, as in Redash's web UI.
@@ -177,7 +193,10 @@ pub struct EditorState {
     pending: Option<Target>,
     /// Snapshots of past runs, newest first; see `history.rs`.
     pub history: Vec<Entry>,
-    pub show_history: bool,
+    pub show_sidebar: bool,
+    pub sidebar_tab: SidebarTab,
+    /// The schema panel's filter, edited in place by the UI; see `schema.rs`.
+    pub schema_filter: String,
     /// The current Unix time in seconds; replaced in tests.
     pub clock: fn() -> u64,
 }
@@ -202,7 +221,9 @@ impl EditorState {
             next_variable_id: 0,
             pending: None,
             history: Vec::new(),
-            show_history: true,
+            show_sidebar: true,
+            sidebar_tab: SidebarTab::History,
+            schema_filter: String::new(),
             clock: history::now,
         }
     }
@@ -213,7 +234,7 @@ impl EditorState {
 
     /// Tables of the selected data source; empty until its schema has loaded.
     pub fn tables(&self) -> &[Table] {
-        match self.selected_source.and_then(|id| self.schemas.get(&id)) {
+        match self.schema() {
             Some(Schema::Loaded(tables)) => tables,
             _ => &[],
         }
@@ -380,15 +401,23 @@ impl EditorState {
         self.load_schema()
     }
 
+    /// The selected source's schema; `None` before it is first requested.
+    pub fn schema(&self) -> Option<&Schema> {
+        self.selected_source.and_then(|id| self.schemas.get(&id))
+    }
+
     /// Fetches the selected source's schema unless it is loaded or on its way.
     fn load_schema(&mut self) -> Vec<Effect> {
-        match self.selected_source {
-            Some(id) if !self.schemas.contains_key(&id) => {
-                self.schemas.insert(id, Schema::Loading);
-                vec![Effect::LoadSchema { config: self.config.clone(), data_source_id: id }]
-            }
-            _ => Vec::new(),
+        match self.schema() {
+            None | Some(Schema::Failed(_)) => self.fetch_schema(false),
+            Some(Schema::Loading | Schema::Loaded(_)) => Vec::new(),
         }
+    }
+
+    fn fetch_schema(&mut self, refresh: bool) -> Vec<Effect> {
+        let Some(id) = self.selected_source else { return Vec::new() };
+        self.schemas.insert(id, Schema::Loading);
+        vec![Effect::LoadSchema { config: self.config.clone(), data_source_id: id, refresh }]
     }
 }
 
@@ -600,9 +629,17 @@ impl AppState {
                 }
                 Vec::new()
             }
-            (Screen::Editor(ed), Event::ToggleHistory) => {
-                ed.show_history = !ed.show_history;
+            (Screen::Editor(ed), Event::ToggleSidebar) => {
+                ed.show_sidebar = !ed.show_sidebar;
                 Vec::new()
+            }
+            (Screen::Editor(ed), Event::ShowSidebarTab(tab)) => {
+                ed.sidebar_tab = tab;
+                ed.show_sidebar = true;
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::RefreshSchema) if !matches!(ed.schema(), Some(Schema::Loading)) => {
+                ed.fetch_schema(true)
             }
             // Not mid-run, which may be waiting for the variables it would replace.
             (Screen::Editor(ed), Event::RestoreHistory(i)) if !ed.running => {
@@ -680,11 +717,10 @@ impl AppState {
                         ed.schemas.insert(data_source_id, Schema::Loaded(tables));
                     }
                     Err(e) => {
-                        // Forget it so selecting the source again retries.
-                        ed.schemas.remove(&data_source_id);
                         if ed.selected_source == Some(data_source_id) {
                             ed.error = Some(format!("Failed to load schema: {e}"));
                         }
+                        ed.schemas.insert(data_source_id, Schema::Failed(e));
                     }
                 }
                 Vec::new()
@@ -836,7 +872,7 @@ mod tests {
     }
 
     fn load_schema(id: i64) -> Effect {
-        Effect::LoadSchema { config: config(), data_source_id: id }
+        Effect::LoadSchema { config: config(), data_source_id: id, refresh: false }
     }
 
     fn tables() -> Vec<Table> {
@@ -984,8 +1020,23 @@ mod tests {
         state.update(Event::SchemaLoaded { data_source_id: 2, result: Err("timeout".into()) });
         assert_eq!(editor(&state).error.as_deref(), Some("Failed to load schema: timeout"));
 
+        assert_eq!(editor(&state).schema(), Some(&Schema::Failed("timeout".into())));
+
         state.update(Event::SelectSource(1));
         assert_eq!(state.update(Event::SelectSource(2)), [load_schema(2)]);
+    }
+
+    #[test]
+    fn refresh_schema_rereads_the_selected_source() {
+        let mut state = connected_editor();
+        let refresh = Effect::LoadSchema { config: config(), data_source_id: 1, refresh: true };
+        assert!(state.update(Event::RefreshSchema).is_empty(), "already loading");
+        state.update(Event::SchemaLoaded { data_source_id: 1, result: Ok(tables()) });
+
+        assert_eq!(state.update(Event::RefreshSchema), std::slice::from_ref(&refresh));
+        assert_eq!(editor(&state).schema(), Some(&Schema::Loading));
+        state.update(Event::SchemaLoaded { data_source_id: 1, result: Err("timeout".into()) });
+        assert_eq!(state.update(Event::RefreshSchema), [refresh], "retries after a failure");
     }
 
     #[test]
@@ -1357,13 +1408,17 @@ mod tests {
     #[test]
     fn loads_toggles_and_clears_history() {
         let mut state = connected_editor();
-        assert!(editor(&state).show_history, "shown by default");
+        assert!(editor(&state).show_sidebar, "shown by default");
+        assert_eq!(editor(&state).sidebar_tab, SidebarTab::History);
         let saved: Vec<Entry> = (0..25).map(|i| Entry::new(i, 1, "select 1", &[])).collect();
         state.update(Event::HistoryLoaded(Ok(saved)));
         assert_eq!(editor(&state).history.len(), history::LIMIT);
 
-        state.update(Event::ToggleHistory);
-        assert!(!editor(&state).show_history, "collapsed");
+        state.update(Event::ToggleSidebar);
+        assert!(!editor(&state).show_sidebar, "collapsed");
+        state.update(Event::ShowSidebarTab(SidebarTab::Schema));
+        assert!(editor(&state).show_sidebar, "a tab shows it again");
+        assert_eq!(editor(&state).sidebar_tab, SidebarTab::Schema);
         assert_eq!(state.update(Event::ClearHistory), [Effect::SaveHistory(vec![])]);
         assert!(editor(&state).history.is_empty());
     }

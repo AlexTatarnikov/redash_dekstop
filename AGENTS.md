@@ -43,7 +43,9 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/vars.rs` | Pure variables: `{{ name }}` references and substitution, a query result as a value (first column as SQL literals). `state.rs` runs the query variables a run needs before it. |
 | `src/ui/variables.rs` | The variables panel (right side): value and query variables, edited in place. |
 | `src/history.rs` | Pure execution history: each Execute records a snapshot (SQL, data source, variable definitions), newest first, last 20; rerunning the newest only updates its time. |
-| `src/ui/history.rs` | The history panel (left, shown by default, collapsed with the toolbar's leftmost icon button): click an entry to restore it. |
+| `src/ui/history.rs` | The history tab of the left sidebar (shown by default; the toolbar's leftmost icon button collapses the sidebar): click an entry to restore it. |
+| `src/schema.rs` | Pure schema filtering for the schema panel: tables matching by name keep all columns, otherwise only matching columns. |
+| `src/ui/schema.rs` | The schema tab of the left sidebar: the selected data source's tables, expanding to columns and types, a filter, and Refresh. |
 | `src/export.rs` | Pure result export: Markdown table (current page, to the clipboard) and CSV (whole result). |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
 | `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests); also saves variables to `variables.json` and history to `history.json` next to the config. |
@@ -65,7 +67,7 @@ flow in `tests/ui.rs`.
   4 = failure, 5 = cancelled), then `GET /api/query_results/{query_result_id}`.
 - `GET /api/data_sources/{id}/schema` returns `{schema: [{name, columns}]}` from cache, or
   `{job}` whose finished `result` is that list; `{error: {code: 1}}` means the source
-  can't list its schema (treated as empty). Columns are bare names or `{name, type}`.
+  can't list its schema (treated as empty). `?refresh=true` makes Redash re-read it (Refresh button). Columns are bare names or `{name, type}`.
 
 ## Gotchas
 

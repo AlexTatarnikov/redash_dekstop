@@ -10,6 +10,7 @@
 //! - `GET /api/data_sources/1/schema` → cached schema: `users`, `orders`, `billing.invoices`
 //!   (columns with types); source 2 → a refresh job, whose `GET /api/jobs/schema` gives
 //!   `events` (bare column names); any other source → "schema not supported"
+//! - query strings (e.g. `?refresh=true`) are logged in `requests()` but ignored for routing
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -99,7 +100,8 @@ fn handle(stream: TcpStream, log: &Log) -> std::io::Result<()> {
     {
         queries.push(sql);
     }
-    let (status, response) = route(&method, &path, &auth, &body);
+    let route_path = path.split_once('?').map_or(path.as_str(), |(p, _)| p);
+    let (status, response) = route(&method, route_path, &auth, &body);
     let response = response.to_string();
     let mut stream = stream;
     write!(

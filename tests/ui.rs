@@ -348,10 +348,10 @@ fn history_restores_a_past_run() {
     let mut h = harness(RedashApp::new(store));
     wait_for(&mut h, "data sources", sources_loaded);
     h.get_by_label("Nothing run yet");
-    h.get_by_label("Toggle history").click();
+    h.get_by_label("Toggle sidebar").click();
     h.run_steps(2);
     assert!(h.query_by_label("Nothing run yet").is_none(), "collapsed");
-    h.get_by_label("Toggle history").click();
+    h.get_by_label("Toggle sidebar").click();
     h.run_steps(2);
     h.get_by_label("Nothing run yet");
 
@@ -375,4 +375,47 @@ fn history_restores_a_past_run() {
     let Screen::Editor(ed) = &h.state().state().screen else { panic!("expected editor") };
     assert_eq!(ed.sql, SAMPLE_SQL);
     assert_eq!(ed.variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["start", "limit"]);
+}
+
+#[test]
+fn schema_panel_lists_tables_and_filters_columns() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(ConfigStore::memory(mock_config(&mock))));
+    wait_for(
+        &mut h,
+        "schema",
+        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty()),
+    );
+    h.get_by_label("Schema").click();
+    h.run_steps(2);
+    h.get_by_label("3 tables");
+    assert!(h.query_by_label("signed_up").is_none(), "collapsed");
+
+    h.get_by_label("users").click();
+    h.run_steps(3);
+    h.get_by_label("signed_up");
+    h.get_by_label("boolean");
+    snapshot(&mut h, "editor_schema");
+
+    type_into(&mut h, "Filter", "paid");
+    h.get_by_label("1 of 3 tables");
+    h.get_by_label("paid_at");
+    assert!(h.query_by_label("order_id").is_none(), "only matching columns");
+
+    h.get_by_label("Refresh").click();
+    wait_for(
+        &mut h,
+        "refreshed schema",
+        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty()),
+    );
+    assert!(mock.requests().contains(&"GET /api/data_sources/1/schema?refresh=true".to_string()));
+
+    // The panel follows the toolbar's data source; source 2 loads through a job.
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.schema_filter.clear();
+    h.get_by(|n| n.value().as_deref() == Some("Analytics DB")).click();
+    h.run_steps(2);
+    h.get_by_label("Events (clickhouse)").click();
+    wait_for(&mut h, "events schema", |h| h.query_by_label("Tables in Events").is_some());
+    wait_for(&mut h, "events table", |h| h.query_by_label("1 table").is_some());
 }

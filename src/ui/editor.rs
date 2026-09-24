@@ -1,9 +1,9 @@
 use eframe::egui;
 
-use super::{completion, history, results, theme, variables};
+use super::{completion, history, results, schema, theme, variables};
 use crate::api::normalize_host;
 use crate::sql::tokenize;
-use crate::state::{EditorState, Event, toggle_line_comment};
+use crate::state::{EditorState, Event, SidebarTab, toggle_line_comment};
 
 pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     let mut event = None;
@@ -13,9 +13,9 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
 
     egui::Panel::top("toolbar").frame(theme::bar_frame(ui.style())).show(ui, |ui| {
         ui.horizontal(|ui| {
-            let tip = if ed.show_history { "Hide history" } else { "Show history" };
-            if theme::sidebar_toggle(ui, ed.show_history, "Toggle history").on_hover_text(tip).clicked() {
-                event = Some(Event::ToggleHistory);
+            let tip = if ed.show_sidebar { "Hide sidebar" } else { "Show history and schema" };
+            if theme::sidebar_toggle(ui, ed.show_sidebar, "Toggle sidebar").on_hover_text(tip).clicked() {
+                event = Some(Event::ToggleSidebar);
             }
             let selected = ed
                 .data_sources
@@ -86,14 +86,14 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
         });
     });
 
-    if ed.show_history {
-        egui::Panel::left("history")
+    if ed.show_sidebar {
+        egui::Panel::left("sidebar")
             .frame(theme::bar_frame(ui.style()))
             .resizable(true)
             .default_size(260.0)
             .min_size(180.0)
             .show(ui, |ui| {
-                if let Some(e) = history::show(ui, ed) {
+                if let Some(e) = sidebar(ui, ed) {
                     event = Some(e);
                 }
             });
@@ -164,6 +164,30 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     });
 
     event
+}
+
+/// The left sidebar: tabs for history and schema, the current tab's buttons, then its content.
+fn sidebar(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
+    let mut event = None;
+    ui.horizontal(|ui| {
+        for (tab, label) in [(SidebarTab::History, "History"), (SidebarTab::Schema, "Schema")] {
+            if ui.add(egui::Button::new(label).selected(ed.sidebar_tab == tab)).clicked() {
+                event = Some(Event::ShowSidebarTab(tab));
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let action = match ed.sidebar_tab {
+                SidebarTab::History => history::actions(ui, ed),
+                SidebarTab::Schema => schema::actions(ui, ed),
+            };
+            event = event.take().or(action);
+        });
+    });
+    let shown = match ed.sidebar_tab {
+        SidebarTab::History => history::show(ui, ed),
+        SidebarTab::Schema => schema::show(ui, ed),
+    };
+    event.or(shown)
 }
 
 pub(super) fn highlight(ui: &egui::Ui, sql: &str) -> egui::text::LayoutJob {
