@@ -3,7 +3,10 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # Pushing a tag like v0.2.0 also publishes a GitHub Release with the macOS build.
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,3 +30,39 @@ jobs:
           name: snapshot-diffs
           path: tests/snapshots/*.new.png
           if-no-files-found: ignore
+
+  macos-release:
+    needs: check
+    # Pull requests only get the checks; builds are for main, tags and manual runs.
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Check tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - run: ./scripts/bundle-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Redash-macos-universal
+          path: |
+            target/dist/*.zip
+            target/dist/*.dmg
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" target/dist/*.zip target/dist/*.dmg \
+            --title "Redash Desktop $GITHUB_REF_NAME" --generate-notes

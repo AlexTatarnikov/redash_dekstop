@@ -13,6 +13,7 @@ cargo test                   # unit tests + headless UI tests + screenshot compa
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 UPDATE_SNAPSHOTS=1 cargo test   # accept intended visual changes (then review the PNG diffs)
+./scripts/bundle-macos.sh    # universal Redash.app + zip/dmg in target/dist/ (ad-hoc signed)
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`; rustup installs it automatically.
@@ -49,6 +50,7 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour; `queries()` returns the SQL it was sent. |
 | `src/main.rs` | Entry point; parses `--mock`. |
 | `tests/ui.rs` | Headless end-to-end tests with `egui_kittest` + snapshots in `tests/snapshots/`. |
+| `.github/workflows/ci.yml` | CI on macOS: fmt, clippy, tests; then (not on PRs) `scripts/bundle-macos.sh`, uploaded as an artifact. A `v*` tag matching the `Cargo.toml` version publishes a GitHub Release. |
 
 Adding a feature usually means: new `Event`/`Effect` variants and a transition in
 `state.rs` (+ tests), perform any new effect in `app.rs`, draw it in `ui/`, cover the
