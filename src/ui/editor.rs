@@ -59,7 +59,12 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             if let Some(err) = &ed.error {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             } else if let Some(view) = &ed.result {
-                ui.label(format!("{} rows · {:.3}s", view.result.data.rows.len(), view.result.runtime));
+                let mut status =
+                    format!("{} rows · {:.3}s", view.result.data.rows.len(), view.result.runtime);
+                if let Some(notice) = &ed.notice {
+                    status += &format!(" · {notice}");
+                }
+                ui.label(status);
             } else {
                 ui.weak("Ready");
             }

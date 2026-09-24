@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::theme;
 use crate::api::QueryResult;
+use crate::export::cell_text;
 use crate::state::{Event, PAGE_SIZES, ResultView};
 
 // Bounds for fitted column widths; wider values are clipped but can be resized by hand.
@@ -72,7 +73,8 @@ pub fn show(ui: &mut egui::Ui, view: &mut ResultView, page_size: usize) {
     });
 }
 
-/// Rows-per-page picker, the visible row range and page buttons. Laid out right to left.
+/// Rows-per-page picker, the visible row range, page buttons and export buttons.
+/// Laid out right to left.
 pub fn pager(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<Event> {
     let mut event = None;
     let last = view.page_count(page_size) - 1;
@@ -102,6 +104,14 @@ pub fn pager(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<E
     });
     if size != page_size {
         event = Some(Event::SetPageSize(size));
+    }
+
+    ui.separator();
+    if ui.button("Export CSV").on_hover_text(format!("Save all {total} rows as a CSV file")).clicked() {
+        event = Some(Event::ExportCsv);
+    }
+    if ui.button("Copy Markdown").on_hover_text("Copy the rows on this page as a Markdown table").clicked() {
+        event = Some(Event::CopyPageMarkdown);
     }
     event
 }
@@ -143,12 +153,4 @@ fn fit_column_widths(ctx: &egui::Context, r: &QueryResult) -> Vec<f32> {
             })
             .collect()
     })
-}
-
-fn cell_text(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => "NULL".into(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
 }

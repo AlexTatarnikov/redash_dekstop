@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod complete;
 pub mod config;
+pub mod export;
 pub mod mock;
 pub mod sql;
 pub mod state;

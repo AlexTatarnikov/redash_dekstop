@@ -33,12 +33,13 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | File | Role |
 |------|------|
 | `src/state.rs` | All app logic. Pure: no egui, no I/O. `update(Event) -> Vec<Effect>`. Most tests live here. |
-| `src/app.rs` | Runtime (`RedashApp`). Performs effects (HTTP on background threads, settings I/O), feeds results back as events. |
+| `src/app.rs` | Runtime (`RedashApp`). Performs effects (HTTP on background threads, settings I/O, clipboard, the native save dialog via `rfd`), feeds results back as events. |
 | `src/ui/*.rs` | Drawing only, one file per screen (`setup`, `editor`, `results`). Returns the `Event` the user triggered. |
 | `src/ui/theme.rs` | The visual theme, modelled on Figma's desktop UI (UI3): Inter font, palette, sizes, and helpers like `primary_button`. Light and dark follow the OS. |
 | `src/sql.rs` | Pure SQL tokenizer for editor highlighting; colours (GitHub's palette) are `theme::syntax_color`. |
 | `src/complete.rs` | Pure SQL autocompletion: suggestions at the cursor from the schema (aliases, `schema.`, `FROM` context). |
 | `src/ui/completion.rs` | The editor's autocomplete popup: when it opens, its keys (↑/↓, Enter/Tab, Esc, Ctrl+Space), drawing. |
+| `src/export.rs` | Pure result export: Markdown table (current page, to the clipboard) and CSV (whole result). |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
 | `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests). |
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour. |
@@ -80,6 +81,8 @@ flow in `tests/ui.rs`.
 - Snapshots must be deterministic: `tests/ui.rs::snapshot` hides the cursor and masks the
   mock's random `http://127.0.0.1:<port>`. Mask anything else that varies per run.
 - Never touch the real settings file in tests; use `ConfigStore::memory`.
+- Never open the native save dialog in tests; use `RedashApp::with_save_dialog` to return a temp path.
+  Clipboard copies show up in `h.output().platform_output.commands` as `OutputCommand::CopyText`.
 - Errors are shown in the UI, never panics: `unwrap`/`expect`/`panic!` are linted outside tests.
 
 ## Manual run (optional)

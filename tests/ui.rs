@@ -246,3 +246,40 @@ fn autocompletes_tables_and_columns() {
     h.run_steps(2);
     assert_eq!(sql(&h), "SELECT 1 FROM users u WHERE u.email > '' AND u.plan");
 }
+
+#[test]
+fn copies_page_as_markdown_and_exports_csv() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = dir.path().join("out.csv");
+    let chosen = csv_path.clone();
+    let app = RedashApp::new(ConfigStore::memory(Some(config))).with_save_dialog(move |name| {
+        assert_eq!(name, "query_result.csv");
+        Some(chosen.clone())
+    });
+    let mut h = harness(app);
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("1–25 of 40").is_some());
+
+    h.get_by_label("›").click();
+    wait_for(&mut h, "page 2", |h| h.query_by_label_contains("26–40 of 40").is_some());
+    h.get_by_label("Copy Markdown").click();
+    h.step();
+    let copied = h.output().platform_output.commands.iter().find_map(|c| match c {
+        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+        _ => None,
+    });
+    let copied = copied.expect("copied to the clipboard");
+    assert_eq!(copied.lines().count(), 2 + 15, "header, separator and page 2's rows");
+    assert!(copied.contains("user26@example.com") && !copied.contains("user25@example.com"));
+    wait_for(&mut h, "notice", |h| h.query_by_label_contains("Copied 15 rows as Markdown").is_some());
+
+    h.get_by_label("Export CSV").click();
+    wait_for(&mut h, "saved", |h| h.query_by_label_contains("Saved").is_some());
+    let csv = std::fs::read_to_string(&csv_path).unwrap();
+    assert_eq!(csv.lines().count(), 1 + 40, "header and every row");
+    assert!(csv.contains("user1@example.com") && csv.contains("user40@example.com"));
+}

@@ -1,6 +1,7 @@
 //! Runtime: owns the [`AppState`], performs [`Effect`]s (network calls on
 //! background threads, settings I/O) and feeds their results back as [`Event`]s.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
@@ -11,9 +12,13 @@ use crate::config::ConfigStore;
 use crate::state::{AppState, Effect, Event};
 use crate::ui;
 
+/// Asks where to save a file, given a suggested name; `None` means cancelled.
+pub type SaveDialog = Box<dyn FnMut(&str) -> Option<PathBuf>>;
+
 pub struct RedashApp {
     state: AppState,
     store: ConfigStore,
+    save_dialog: SaveDialog,
     /// Effects produced before the first frame, when no `egui::Context` exists yet.
     pending: Vec<Effect>,
     tx: Sender<Event>,
@@ -25,7 +30,13 @@ impl RedashApp {
     pub fn new(store: ConfigStore) -> Self {
         let (state, pending) = AppState::new(store.load());
         let (tx, rx) = channel();
-        Self { state, store, pending, tx, rx, themed: false }
+        Self { state, store, save_dialog: Box::new(native_save_dialog), pending, tx, rx, themed: false }
+    }
+
+    /// Replaces the native save dialog, e.g. so tests can save without a window.
+    pub fn with_save_dialog(mut self, dialog: impl FnMut(&str) -> Option<PathBuf> + 'static) -> Self {
+        self.save_dialog = Box::new(dialog);
+        self
     }
 
     pub fn state(&self) -> &AppState {
@@ -85,6 +96,15 @@ impl RedashApp {
                     self.dispatch(ctx, Event::ConfigError(format!("Could not remove settings: {e}")));
                 }
             }
+            Effect::CopyToClipboard(text) => ctx.copy_text(text),
+            Effect::SaveCsv { file_name, contents } => match (self.save_dialog)(&file_name) {
+                Some(path) => self.spawn(ctx, move || {
+                    Event::CsvSaved(
+                        std::fs::write(&path, contents).map(|()| Some(path)).map_err(|e| e.to_string()),
+                    )
+                }),
+                None => self.dispatch(ctx, Event::CsvSaved(Ok(None))),
+            },
         }
     }
 
@@ -98,6 +118,11 @@ impl RedashApp {
             ctx.request_repaint();
         });
     }
+}
+
+/// The OS "Save" dialog. Modal: it blocks the UI until the user answers.
+fn native_save_dialog(file_name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_file_name(file_name).add_filter("CSV", &["csv"]).save_file()
 }
 
 impl eframe::App for RedashApp {

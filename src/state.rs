@@ -7,9 +7,11 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use crate::api::{DataSource, QueryResult, Table};
 use crate::config::Config;
+use crate::export;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -23,6 +25,10 @@ pub enum Event {
     ShowPage(usize),
     /// Change rows per page, keeping the first visible row on screen.
     SetPageSize(usize),
+    /// Copy the rows on the current page to the clipboard as a Markdown table.
+    CopyPageMarkdown,
+    /// Save the whole result as a CSV file chosen by the user.
+    ExportCsv,
     // Results of effects, delivered by the runtime.
     DataSourcesLoaded(Result<Vec<DataSource>, String>),
     QueryFinished(Result<QueryResult, String>),
@@ -31,6 +37,8 @@ pub enum Event {
         result: Result<Vec<Table>, String>,
     },
     ConfigError(String),
+    /// The CSV file was written; `Ok(None)` when the user cancelled the dialog.
+    CsvSaved(Result<Option<PathBuf>, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +59,13 @@ pub enum Effect {
     },
     SaveConfig(Config),
     ClearConfig,
+    CopyToClipboard(String),
+    /// Ask where to save (suggesting `file_name`) and write `contents` there.
+    /// Answered by [`Event::CsvSaved`].
+    SaveCsv {
+        file_name: String,
+        contents: String,
+    },
 }
 
 /// A data source's tables and columns, for autocompletion.
@@ -97,6 +112,8 @@ pub struct EditorState {
     pub running: bool,
     pub result: Option<ResultView>,
     pub error: Option<String>,
+    /// Confirmation of the last action (e.g. an export), shown in the status bar.
+    pub notice: Option<String>,
     /// Rows per page; kept across results.
     pub page_size: usize,
     /// Per data source; fetched when a source is first selected, refetched on reload.
@@ -116,6 +133,7 @@ impl EditorState {
             running: false,
             result: None,
             error: None,
+            notice: None,
             page_size: PAGE_SIZES[0],
             schemas: HashMap::new(),
             results_shown: 0,
@@ -153,6 +171,10 @@ impl EditorState {
             _ => Vec::new(),
         }
     }
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 { word.into() } else { format!("{word}s") }
 }
 
 /// Whether `sql` has anything besides whitespace and comments (`-- …` to the end of
@@ -317,6 +339,7 @@ impl AppState {
             (Screen::Editor(ed), Event::Execute) if ed.can_execute() => {
                 ed.running = true;
                 ed.error = None;
+                ed.notice = None;
                 vec![Effect::Execute {
                     config: ed.config.clone(),
                     data_source_id: ed.selected_source.unwrap_or_default(),
@@ -385,6 +408,30 @@ impl AppState {
                     view.page = view.page_rows(ed.page_size).start / size;
                 }
                 ed.page_size = size;
+                Vec::new()
+            }
+            (Screen::Editor(ed), Event::CopyPageMarkdown) => match &ed.result {
+                Some(view) => {
+                    let rows = view.page_rows(ed.page_size);
+                    let n = rows.len();
+                    ed.notice = Some(format!("Copied {n} {} as Markdown", plural(n, "row")));
+                    vec![Effect::CopyToClipboard(export::markdown_table(&view.result, rows))]
+                }
+                None => Vec::new(),
+            },
+            (Screen::Editor(ed), Event::ExportCsv) => match &ed.result {
+                Some(view) => vec![Effect::SaveCsv {
+                    file_name: "query_result.csv".into(),
+                    contents: export::csv(&view.result),
+                }],
+                None => Vec::new(),
+            },
+            (Screen::Editor(ed), Event::CsvSaved(res)) => {
+                match res {
+                    Ok(Some(path)) => ed.notice = Some(format!("Saved {}", path.display())),
+                    Ok(None) => {}
+                    Err(e) => ed.error = Some(format!("Could not export CSV: {e}")),
+                }
                 Vec::new()
             }
             (Screen::Editor(ed), Event::ConfigError(e)) => {
@@ -687,6 +734,43 @@ mod tests {
         state.update(Event::QueryFinished(Ok(result_with_rows(300))));
         assert_eq!(editor(&state).page_size, 50);
         assert_eq!(page_rows(&state), 0..50);
+    }
+
+    #[test]
+    fn copies_current_page_as_markdown() {
+        let mut state = connected_editor();
+        assert!(state.update(Event::CopyPageMarkdown).is_empty(), "no result yet");
+
+        let mut state = editor_with_result(30);
+        state.update(Event::ShowPage(1));
+        let effects = state.update(Event::CopyPageMarkdown);
+        let rows: String = (25..30).map(|i| format!("| {i} |\n")).collect();
+        assert_eq!(effects, [Effect::CopyToClipboard(format!("| n |\n| --- |\n{rows}"))]);
+        assert_eq!(editor(&state).notice.as_deref(), Some("Copied 5 rows as Markdown"));
+
+        state.update(Event::Execute);
+        assert_eq!(editor(&state).notice, None, "cleared by the next run");
+    }
+
+    #[test]
+    fn exports_whole_result_as_csv() {
+        let mut state = connected_editor();
+        assert!(state.update(Event::ExportCsv).is_empty(), "no result yet");
+
+        let mut state = editor_with_result(30);
+        let effects = state.update(Event::ExportCsv);
+        let rows: String = (0..30).map(|i| format!("{i}\r\n")).collect();
+        assert_eq!(
+            effects,
+            [Effect::SaveCsv { file_name: "query_result.csv".into(), contents: format!("n\r\n{rows}") }]
+        );
+
+        state.update(Event::CsvSaved(Ok(None)));
+        assert_eq!((&editor(&state).notice, &editor(&state).error), (&None, &None), "cancelled");
+        state.update(Event::CsvSaved(Ok(Some("/tmp/q.csv".into()))));
+        assert_eq!(editor(&state).notice.as_deref(), Some("Saved /tmp/q.csv"));
+        state.update(Event::CsvSaved(Err("disk full".into())));
+        assert_eq!(editor(&state).error.as_deref(), Some("Could not export CSV: disk full"));
     }
 
     #[test]
