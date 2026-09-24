@@ -65,6 +65,7 @@ flow in `tests/ui.rs`.
   glyphs already used in the UI (`▶`, `…`), and check the snapshot.
 - Styling goes through `ui/theme.rs`: no hard-coded colours or font sizes in screens. Use
   `theme::primary_button` for a screen's main action and `theme::bar_frame` for bars.
+  Use `ui.button` (not `small_button`) so controls in a row share the 24px height.
   Fonts are embedded from `assets/fonts/` (Inter, SIL Open Font License; keep `Inter-LICENSE.txt`).
   Check both `editor_results.png` (dark) and `editor_results_light.png` after visual changes.
 - Widgets must be findable by tests: give text inputs an accessible label with

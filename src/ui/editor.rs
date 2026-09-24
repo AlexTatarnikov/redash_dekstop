@@ -31,7 +31,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
             );
             if ed.loading_sources {
                 ui.spinner();
-            } else if ui.small_button("Reload").on_hover_text("Reload data sources").clicked() {
+            } else if ui.button("Reload").on_hover_text("Reload data sources").clicked() {
                 event = Some(Event::ReloadDataSources);
             }
 
