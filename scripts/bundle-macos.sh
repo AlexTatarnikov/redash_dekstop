@@ -29,7 +29,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 SLICES=()
 for target in "${TARGETS[@]}"; do SLICES+=("target/$target/release/$BIN"); done
 lipo -create -output "$APP/Contents/MacOS/$BIN" "${SLICES[@]}"
-cp assets/fonts/Inter-LICENSE.txt "$APP/Contents/Resources/"
+cp assets/fonts/Geist-LICENSE.txt "$APP/Contents/Resources/"
 
 # Redash.icns from the committed 1024px PNG (scripts/render-icon.sh renders it from the SVG).
 ICONSET="$DIST/$APP_NAME.iconset"
