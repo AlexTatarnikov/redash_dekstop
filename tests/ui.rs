@@ -39,8 +39,13 @@ fn wait_for(h: &mut Harness<'_, RedashApp>, what: &str, done: impl Fn(&Harness<'
 /// port wherever the host is shown.
 fn snapshot(h: &mut Harness<'_, RedashApp>, name: &str) {
     h.remove_cursor();
+    snapshot_hovering(h, name);
+}
+
+/// Like `snapshot`, but leaves the pointer where it is, to show a hover state.
+fn snapshot_hovering(h: &mut Harness<'_, RedashApp>, name: &str) {
     h.run_steps(2);
-    // The host label's width depends on the port's digits (Inter digits vary in width),
+    // The host label's width depends on the port's digits (Geist digits vary in width),
     // so mask a fixed-width area ending at its right edge (it is right-aligned).
     let mut rects: Vec<_> = h
         .query_all_by_label_contains("http://127.0.0.1")
@@ -247,6 +252,356 @@ fn cmd_slash_toggles_sql_comment() {
 }
 
 #[test]
+fn highlights_the_cursor_line_and_pads_the_text_from_line_numbers() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.run_steps(2);
+    // Clicking below the text puts the cursor at the end; up moves it into the
+    // wrapped WHERE line, which is highlighted across both of its rows.
+    h.query_all_by(|n| n.value().as_deref() == Some(SAMPLE_SQL)).next().unwrap().click();
+    h.run_steps(2);
+    h.key_press(egui::Key::ArrowUp);
+    h.run_steps(2);
+    snapshot(&mut h, "editor_current_line");
+}
+
+#[test]
+fn hovering_sidebar_tabs_does_not_shift_them() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    let tabs = ["History", "Saved", "Schema"];
+    let rects = |h: &Harness<'_, RedashApp>| tabs.map(|t| h.get_by_label(t).rect());
+    let before = rects(&h);
+    for tab in tabs {
+        h.get_by_label(tab).hover();
+        h.run_steps(2);
+        assert_eq!(rects(&h), before, "hovering {tab} moved the tabs");
+    }
+}
+
+#[test]
+fn hovering_data_source_options_does_not_shift_them() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    h.get_by(|n| n.value().as_deref() == Some("Analytics DB")).click();
+    h.run_steps(2);
+    let options = ["Analytics DB (pg)", "Events (clickhouse)"];
+    let rects = options.map(|o| h.get_by_label(o).rect());
+    // Away from the list, so no option is hovered.
+    h.hover_at(egui::pos2(700.0, 500.0));
+    h.run_steps(2);
+    let image = h.render().unwrap();
+    let idle = rects.map(|r| text_origin(|x, y| image.get_pixel(x, y).0, r));
+    for (option, rect) in options.iter().zip(rects) {
+        h.get_by_label(option).hover();
+        h.run_steps(2);
+        assert_eq!(h.get_by_label(option).rect(), rect, "hovering {option} resized it");
+        let image = h.render().unwrap();
+        let i = options.iter().position(|o| o == option).unwrap();
+        let origin = text_origin(|x, y| image.get_pixel(x, y).0, rect);
+        assert_eq!(origin, idle[i], "hovering {option} moved its text");
+    }
+    // The hovered option stands out from the list (Events, below the selected one).
+    h.get_by_label("Events (clickhouse)").hover();
+    snapshot_hovering(&mut h, "editor_data_source_menu");
+    h.get_by_label("Events (clickhouse)").click();
+    h.run_steps(2);
+    h.get_by(|n| n.value().as_deref() == Some("Events"));
+}
+
+/// Top-left corner of the bright (text) pixels inside `rect` of a dark-mode render,
+/// given as a pixel lookup, to catch text moving without its widget's rect changing.
+fn text_origin(pixel: impl Fn(u32, u32) -> [u8; 4], rect: egui::Rect) -> (u32, u32) {
+    let (mut x0, mut y0) = (u32::MAX, u32::MAX);
+    for y in rect.min.y as u32..rect.max.y as u32 {
+        for x in rect.min.x as u32..rect.max.x as u32 {
+            if pixel(x, y)[..3].iter().any(|&c| c > 150) {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+            }
+        }
+    }
+    (x0, y0)
+}
+
+#[test]
+fn clickable_widgets_show_the_pointing_hand() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+    let cursor_over = |h: &mut Harness<'_, RedashApp>, node: egui::Rect| {
+        h.hover_at(node.center());
+        h.run_steps(2);
+        h.output().platform_output.cursor_icon
+    };
+    let hand = egui::CursorIcon::PointingHand;
+
+    let clickable = [
+        h.get_by_label("▶ Execute").rect(),
+        h.get_by_label("Toggle sidebar").rect(),
+        h.get_by_label("Saved").rect(),
+        h.get_by(|n| n.value().as_deref() == Some("Analytics DB")).rect(),
+        h.get_by(|n| n.value().as_deref() == Some("25 / page")).rect(),
+        h.get_by_label_contains("Analytics DB · 2 variables").rect(),
+    ];
+    for rect in clickable {
+        assert_eq!(cursor_over(&mut h, rect), hand, "at {rect:?}");
+    }
+    let editor = h.query_all_by(|n| n.value().as_deref() == Some(SAMPLE_SQL)).next().unwrap().rect();
+    assert_eq!(cursor_over(&mut h, editor), egui::CursorIcon::Text);
+
+    h.get_by_label("Schema").click();
+    wait_for(&mut h, "schema", |h| h.query_by_label("users").is_some());
+    let table = h.get_by_label("users").rect();
+    assert_eq!(cursor_over(&mut h, table), hand, "schema table");
+}
+
+#[test]
+fn spare_width_is_shared_by_the_result_columns() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+    // Left edges of the columns' headers.
+    let edges = |h: &Harness<'_, RedashApp>| {
+        let x = |name: &str| h.get_by_label(name).rect().min.x;
+        (x("email"), x("plan"), x("signed_up"), x("mrr"))
+    };
+    let (email, plan, signed_up, mrr) = edges(&h);
+
+    // Closing the variables panel widens the results: every column gets the same share.
+    // The toggle is the leftmost "Variables"; the other is the panel's heading.
+    h.query_all_by_label("Variables")
+        .min_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x))
+        .unwrap()
+        .click();
+    h.run_steps(4);
+    let (email2, plan2, signed_up2, mrr2) = edges(&h);
+    let share = (plan2 - email2) - (plan - email);
+    assert!(share > 20.0, "email grew by {share}");
+    assert!(((signed_up2 - plan2) - (signed_up - plan) - share).abs() <= 1.0, "plan grew like email");
+    assert!(((mrr2 - signed_up2) - (mrr - signed_up) - share).abs() <= 1.0, "signed_up too");
+    // Numbers are left-aligned like everything else, so they line up with the NULLs
+    // in their column and with its header.
+    let null = h.query_all_by_label("NULL").next().unwrap().rect().min.x;
+    let number = h.get_by_label("12.5").rect().min.x;
+    assert!(
+        (null - mrr2).abs() <= 1.0 && (number - mrr2).abs() <= 1.0,
+        "mrr at {mrr2}, 12.5 at {number}, NULL at {null}"
+    );
+    snapshot(&mut h, "editor_results_wide");
+}
+
+#[test]
+fn schema_inserts_tables_and_columns_into_the_query() {
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(
+        &mut h,
+        "schema",
+        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty()),
+    );
+    let sql = |h: &Harness<'_, RedashApp>| match &h.state().state().screen {
+        Screen::Editor(ed) => ed.sql.clone(),
+        Screen::Setup(_) => panic!("expected editor"),
+    };
+    // Clicking below the text puts the cursor at the end.
+    set_sql(&mut h, "SELECT * FROM ");
+    h.run_steps(2);
+    h.query_all_by(|n| n.value().as_deref() == Some("SELECT * FROM ")).next().unwrap().click();
+    h.run_steps(2);
+    h.get_by_label("Schema").click();
+    h.run_steps(2);
+
+    // A table goes in at the cursor, and the editor gets the focus back.
+    assert!(h.query_by_label("Insert users").is_none(), "hidden until hovered");
+    let tables = |h: &Harness<'_, RedashApp>| {
+        ["users", "orders", "billing.invoices"].map(|t| h.get_by_label(t).rect())
+    };
+    let before = tables(&h);
+    h.get_by_label("users").hover();
+    h.run_steps(2);
+    assert_eq!(tables(&h), before, "hovering a table moves nothing");
+    snapshot_hovering(&mut h, "editor_schema_insert");
+    h.get_by_label("Insert users").click();
+    h.run_steps(2);
+    assert_eq!(sql(&h), "SELECT * FROM users");
+    assert!(
+        h.query_all_by(|n| n.value().as_deref() == Some("SELECT * FROM users")).next().unwrap().is_focused()
+    );
+    assert!(h.query_by_label("signed_up").is_none(), "inserting doesn't expand the table");
+
+    // A column replaces the selected text.
+    let id = egui::Id::new("sql_text");
+    let mut state = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap();
+    let star = egui::text::CCursorRange::two(egui::text::CCursor::new(7), egui::text::CCursor::new(8));
+    state.cursor.set_char_range(Some(star));
+    state.store(&h.ctx, id);
+    h.get_by_label("users").click();
+    h.run_steps(2);
+    let columns =
+        |h: &Harness<'_, RedashApp>| ["id", "email", "plan", "orders"].map(|c| h.get_by_label(c).rect());
+    let before = columns(&h);
+    h.get_by_label("email").hover();
+    h.run_steps(2);
+    assert_eq!(columns(&h), before, "hovering a column moves nothing");
+    let button = h.get_by_label("Insert email").rect();
+    // email's type, on the button's row (plan is text too).
+    let kind = h
+        .query_all_by_label("text")
+        .map(|n| n.rect())
+        .find(|r| r.y_range().contains(button.center().y))
+        .unwrap();
+    assert!(button.min.x >= kind.max.x, "the button {button:?} is clear of the type {kind:?}");
+    snapshot_hovering(&mut h, "editor_schema_insert_column");
+    h.get_by_label("Insert email").click();
+    h.run_steps(2);
+    assert_eq!(sql(&h), "SELECT email FROM users");
+}
+
+#[test]
+fn query_actions_sit_under_the_editor_with_search_on_the_right() {
+    let mock = MockRedash::start().unwrap();
+    let mut h = harness(RedashApp::new(store(mock_config(&mock))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    set_sql(&mut h, SAMPLE_SQL);
+    h.get_by_label("▶ Execute").click();
+    wait_for(&mut h, "results", |h| h.query_by_label_contains("40 rows").is_some());
+    let rect = |label: &str| {
+        h.query_all_by_label(label).map(|n| n.rect()).min_by(|a, b| a.min.x.total_cmp(&b.min.x)).unwrap()
+    };
+    let (execute, save, variables, search) =
+        (rect("▶ Execute"), rect("Save"), rect("Variables"), rect("Search"));
+    let editor = h.query_all_by(|n| n.value().as_deref() == Some(SAMPLE_SQL)).next().unwrap().rect();
+    assert!(execute.min.y > editor.max.y, "under the editor");
+    for (name, r) in [("Save", save), ("Variables", variables), ("Search", search)] {
+        assert!((r.center().y - execute.center().y).abs() < 1.0, "{name} on Execute's row");
+    }
+    assert!(execute.max.x < save.min.x && save.max.x < variables.min.x, "Execute, Save, Variables");
+    // The box, labelled "Search" too, ends where the editor above does.
+    let search_box =
+        h.query_all_by_label("Search").map(|n| n.rect()).max_by(|a, b| a.max.x.total_cmp(&b.max.x)).unwrap();
+    assert!(search.min.x > variables.max.x, "Search right of the buttons");
+    assert!((search_box.max.x - editor.max.x).abs() <= 4.0, "at the right: {search_box:?} vs {editor:?}");
+    // Icons, square like the bar's height, not text buttons.
+    assert_eq!(save.width(), save.height());
+    assert_eq!(variables.width(), variables.height());
+    assert!(h.query_by_label("Reload").unwrap().rect().max.y < editor.min.y, "Reload stays in the toolbar");
+}
+
+#[test]
+fn schema_with_long_names_stays_within_the_sidebar() {
+    use redash_desktop::api::{Table, TableColumn};
+    use redash_desktop::state::Schema;
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(
+        &mut h,
+        "schema",
+        |h| matches!(&h.state().state().screen, Screen::Editor(ed) if !ed.tables().is_empty()),
+    );
+    let column = |name: &str, kind: &str| TableColumn { name: name.into(), kind: Some(kind.into()) };
+    let long_table = "analytics_warehouse.customer_subscription_billing_events_daily_snapshot";
+    let tables = vec![
+        Table {
+            name: long_table.into(),
+            columns: vec![
+                column("id", "integer"),
+                column("subscription_billing_period_start_timestamp_utc", "timestamp without time zone"),
+                column("customer_lifetime_value_estimate_usd", "double precision"),
+            ],
+        },
+        Table { name: "users".into(), columns: vec![column("id", "integer")] },
+    ];
+    let Screen::Editor(ed) = &mut h.state_mut().state_mut().screen else { panic!("expected editor") };
+    ed.schemas.insert(1, Schema::Loaded(tables));
+    h.get_by_label("Schema").click();
+    h.run_steps(2);
+    h.get_by_label(long_table).click();
+    h.run_steps(3);
+    let long_column = "subscription_billing_period_start_timestamp_utc";
+    h.get_by_label(long_column).hover();
+    h.run_steps(2);
+
+    // Everything ends inside the sidebar (the work area starts at the toggle's panel),
+    // and the column's name, its type and the insert button don't overlap.
+    let sidebar_right = h.get_by_label("Toggle sidebar").rect().min.x - 8.0;
+    let row = h.get_by_label(long_column).rect();
+    let kind = h.get_by_label("timestamp without time zone").rect();
+    let insert = h.get_by_label(&format!("Insert {long_column}")).rect();
+    for (name, r) in [("table", h.get_by_label(long_table).rect()), ("type", kind), ("insert", insert)] {
+        assert!(r.max.x <= sidebar_right, "{name} {r:?} spills past the sidebar at {sidebar_right}");
+    }
+    assert!(
+        row.max.x <= kind.min.x && kind.max.x <= insert.min.x,
+        "name {row:?}, type {kind:?}, insert {insert:?}"
+    );
+    snapshot_hovering(&mut h, "editor_schema_long_names");
+
+    // The whole list, without the hovered row's tooltip over it; then autocompletion.
+    h.get_by_label("users").click();
+    h.run_steps(3);
+    snapshot(&mut h, "editor_schema_long_names_list");
+    set_sql(&mut h, "SELECT ");
+    h.run_steps(2);
+    h.query_all_by(|n| n.value().as_deref() == Some("SELECT ")).next().unwrap().click();
+    h.run_steps(2);
+    h.query_all_by(|n| n.value().as_deref() == Some("SELECT ")).next().unwrap().type_text("sub");
+    h.run_steps(2);
+    assert_eq!(h.query_all_by_label(long_column).count(), 2, "in the schema and the suggestions");
+    snapshot(&mut h, "editor_autocomplete_long_names");
+}
+
+#[test]
+fn results_with_long_column_names_stay_readable() {
+    use redash_desktop::state::Event;
+    let mock = MockRedash::start().unwrap();
+    let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
+    let mut h = harness(RedashApp::new(ConfigStore::memory(Some(config))));
+    wait_for(&mut h, "data sources", sources_loaded);
+    let long = "subscription_billing_period_start_timestamp_utc_with_a_very_long_suffix_for_testing";
+    let rows: Vec<_> = (1..=5)
+        .map(|i| serde_json::json!({ "id": i, long: format!("2026-09-0{i}T00:00:00"), "customer_lifetime_value_estimate_usd": i * 10 }))
+        .collect();
+    let result = serde_json::from_value(serde_json::json!({
+        "data": {
+            "columns": [{ "name": "id" }, { "name": long }, { "name": "customer_lifetime_value_estimate_usd" }],
+            "rows": rows,
+        },
+        "runtime": 0.1,
+    }))
+    .unwrap();
+    let state = h.state_mut().state_mut();
+    let Screen::Editor(ed) = &mut state.screen else { panic!("expected editor") };
+    ed.running = true;
+    state.update(Event::QueryFinished(Ok(result)));
+    h.run_steps(4);
+
+    // Headers fit their column or are clipped inside it: none runs into the next.
+    let (id, long_header, last) = (
+        h.get_by_label("id").rect(),
+        h.get_by_label(long).rect(),
+        h.get_by_label("customer_lifetime_value_estimate_usd").rect(),
+    );
+    assert!(id.max.x < long_header.min.x && long_header.min.x < last.min.x);
+    snapshot(&mut h, "editor_results_long_names");
+}
+
+#[test]
 fn commented_out_sql_cannot_run() {
     let mock = MockRedash::start().unwrap();
     let config = Config { host: mock.url().into(), api_key: MOCK_API_KEY.into() };
@@ -361,17 +716,17 @@ fn search_finds_and_cycles_through_matches() {
 
     // "pro" is a `plan` in every third row; only the page is searched, all columns stay.
     type_into(&mut h, "Search", "pro");
-    h.get_by_label("1 of 9 matches · 9 of 25 rows");
+    h.get_by_label("1 of 9 matches");
     h.get_by_label("1–25 of 40");
     h.get_by_label("user1@example.com");
     assert!(h.query_by_label("user2@example.com").is_none(), "only matching rows");
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
-    h.get_by_label("2 of 9 matches · 9 of 25 rows");
+    h.get_by_label("2 of 9 matches");
     snapshot(&mut h, "editor_results_search");
     h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
     h.run_steps(2);
-    h.get_by_label("1 of 9 matches · 9 of 25 rows");
+    h.get_by_label("1 of 9 matches");
 
     h.get_by_label("Copy Markdown").click();
     h.step();
@@ -389,16 +744,16 @@ fn search_finds_and_cycles_through_matches() {
     assert!(h.get_by_label("Search").is_focused());
     h.get_by_label("Search").type_text("example");
     h.run_steps(2);
-    h.get_by_label("1 of 25 matches · 25 of 25 rows");
+    h.get_by_label("1 of 25 matches");
     h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
     h.run_steps(2);
-    h.get_by_label("25 of 25 matches · 25 of 25 rows");
+    h.get_by_label("25 of 25 matches");
     h.get_by_label("user25@example.com");
 
     // The next page is searched when shown.
     h.get_by_label("›").click();
     wait_for(&mut h, "page 2", |h| h.query_by_label("26–40 of 40").is_some());
-    h.get_by_label("1 of 15 matches · 15 of 15 rows");
+    h.get_by_label("1 of 15 matches");
 
     replace_text(&mut h, "Search", "zzz");
     h.get_by_label("No matches");
@@ -481,6 +836,29 @@ fn history_restores_a_past_run() {
     let Screen::Editor(ed) = &h.state().state().screen else { panic!("expected editor") };
     assert_eq!(ed.sql, SAMPLE_SQL);
     assert_eq!(ed.variables.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["start", "limit"]);
+
+    // An entry's remove button shows on hover, and removes it without restoring it.
+    h.hover_at(egui::pos2(700.0, 500.0));
+    h.run_steps(2);
+    assert!(h.query_by_label("Remove from history").is_none(), "hidden until hovered");
+    h.get_by_label("SELECT 1").hover();
+    h.run_steps(2);
+    snapshot_hovering(&mut h, "editor_history_hover");
+    h.get_by_label("Remove from history").click();
+    h.run_steps(2);
+    let history = |h: &Harness<'_, RedashApp>| match &h.state().state().screen {
+        Screen::Editor(ed) => (ed.history.iter().map(|e| e.sql.clone()).collect::<Vec<_>>(), ed.sql.clone()),
+        Screen::Setup(_) => panic!("expected editor"),
+    };
+    assert_eq!(history(&h), (vec![SAMPLE_SQL.to_string()], SAMPLE_SQL.to_string()));
+
+    // Clear all is at the bottom of the sidebar, well below the entries.
+    let clear = h.get_by_label("Clear all").rect();
+    assert!(clear.min.y > 650.0, "at the bottom: {clear:?}");
+    h.get_by_label("Clear all").click();
+    h.run_steps(2);
+    assert!(history(&h).0.is_empty());
+    h.get_by_label("Nothing run yet");
 }
 
 #[test]
@@ -542,6 +920,13 @@ fn saves_renames_restores_and_deletes_queries() {
     h.get_by_label("Delete").click();
     h.run_steps(2);
     assert_eq!(saved_names(&h), ["One"]);
+
+    // Or with the remove button of the hovered query.
+    h.get_by_label("One").hover();
+    h.run_steps(2);
+    h.get_by_label("Delete query").click();
+    h.run_steps(2);
+    assert!(saved_names(&h).is_empty());
 }
 
 #[test]
@@ -569,7 +954,7 @@ fn schema_panel_lists_tables_and_filters_columns() {
     h.get_by_label("paid_at");
     assert!(h.query_by_label("order_id").is_none(), "only matching columns");
 
-    h.get_by_label("Refresh").click();
+    h.get_by_label("Refresh schema").click();
     let refreshed = "GET /api/data_sources/1/schema?refresh=true".to_string();
     wait_for(&mut h, "refreshed schema", |h| {
         mock.requests().contains(&refreshed)

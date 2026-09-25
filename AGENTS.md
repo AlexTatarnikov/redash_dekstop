@@ -36,21 +36,21 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 |------|------|
 | `src/state.rs` | All app logic. Pure: no egui, no I/O. `update(Event) -> Vec<Effect>`. Most tests live here. |
 | `src/app.rs` | Runtime (`RedashApp`). Performs effects (HTTP on background threads, settings I/O, clipboard, the native save dialog via `rfd`), feeds results back as events. |
-| `src/ui/*.rs` | Drawing only, one file per screen (`setup`, `editor`, `results`). Returns the `Event` the user triggered. |
-| `src/ui/theme.rs` | The visual theme, modelled on Figma's desktop UI (UI3): Inter font, palette, sizes, and helpers like `primary_button`. Light and dark follow the OS. Controls are outlined; secondary text meets WCAG AA contrast. `value_color` colours result cells by `export::ValueKind` (numbers, dates, booleans, JSON, NULL) using the SQL syntax palette. |
+| `src/ui/*.rs` | Drawing only, one file per screen (`setup`, `editor`, `results`). Returns the `Event` the user triggered. The editor's work area: a toolbar (sidebar toggle, data source, Reload, host, Disconnect), the SQL editor, then a bar under it with Execute and the Save / Variables icon buttons on the left and the results search (`results::search`, right to left) on the right, the results, and the status bar with the pager. |
+| `src/ui/theme.rs` | The visual theme, modelled on Keel's workspace UI: Geist / Geist Mono, zinc greys, orange accent, 28px controls with 8px corners, and helpers like `primary_button`. Light and dark follow the OS. The editor screen is a shell: the sidebar on the canvas (`sidebar_frame`), everything else on a rounded surface inset by `SHELL_GAP` (`shell_frame` + `workspace_frame`); panels inside it use `bar_frame`, which has no fill so the surface's corners show. Controls are outlined; secondary text meets WCAG AA contrast. `value_color` colours result cells by `export::ValueKind` (numbers, dates, booleans, JSON, NULL) using the SQL syntax palette. |
 | `src/sql.rs` | Pure SQL tokenizer for editor highlighting; colours (GitHub's palette) are `theme::syntax_color`. |
 | `src/complete.rs` | Pure SQL autocompletion: suggestions at the cursor from the schema (aliases, `schema.`, `FROM` context). |
-| `src/ui/completion.rs` | The editor's autocomplete popup: when it opens, its keys (↑/↓, Enter/Tab, Esc, Ctrl+Space), drawing. |
+| `src/ui/completion.rs` | The editor's autocomplete popup: when it opens, its keys (↑/↓, Enter/Tab, Esc, Ctrl+Space), drawing. It widens to its longest suggestion (320–560px); longer names end in "…" before their type. |
 | `src/vars.rs` | Pure variables: `{{ name }}` references and substitution, a query result as a value (first column as SQL literals). `state.rs` runs the query variables a run needs before it. |
 | `src/ui/variables.rs` | The variables panel (right side): value and query variables, edited in place. |
 | `src/history.rs` | Pure execution history: each Execute records a snapshot (SQL, data source, variable definitions), newest first, last 20; rerunning the newest only updates its time. |
-| `src/ui/history.rs` | The history tab of the left sidebar (shown by default; the toolbar's leftmost icon button collapses the sidebar): click an entry to restore it. Its `row`/`meta` draw the saved queries too. |
+| `src/ui/history.rs` | The history tab of the left sidebar (shown by default; the toolbar's leftmost icon button collapses the sidebar): click an entry to restore it; the hovered entry's × removes it; Clear all sits at the bottom. Its `row`/`meta`/`divider` draw the saved queries too. |
 | `src/saved.rs` | Pure saved queries: like a history snapshot, but kept on purpose (toolbar Save / Cmd+S), newest first, no limit, with a name (the first SQL line until renamed). |
-| `src/ui/saved.rs` | The saved tab of the left sidebar: click to restore; right-click (or double-click) to rename in place (`EditorState::renaming`; Enter or clicking away keeps it, Esc cancels) or delete. Saving opens the tab and starts renaming the new query. |
+| `src/ui/saved.rs` | The saved tab of the left sidebar: click to restore; right-click (or double-click) to rename in place (`EditorState::renaming`; Enter or clicking away keeps it, Esc cancels) or delete; the hovered query's × deletes it too. Saving opens the tab and starts renaming the new query. |
 | `src/schema.rs` | Pure schema filtering for the schema panel: tables matching by name come first and keep all columns, otherwise only matching columns. |
-| `src/ui/schema.rs` | The schema tab of the left sidebar: the selected data source's tables, expanding to columns and types, a filter, and Refresh. |
+| `src/ui/schema.rs` | The schema tab of the left sidebar: the selected data source's tables (a table icon, accented while expanded) expanding to columns and types, a filter, and a refresh icon button after it. A hovered table or column shows » to insert its name into the SQL at the cursor or over the selection (`editor::insert_at_cursor`, text by `state::insert_name`). egui collapses a text edit's selection once it loses focus, so the editor keeps its last focused selection in memory (`selection_id`). |
 | `src/search.rs` | Pure results search, like a browser's find in page, over the shown page only (rerun when the page changes, so huge results stay cheap): every occurrence in the values (as shown, so `null` finds NULLs; not column names) and the page's rows containing one. The table hides the page's other rows, highlights matches (`theme::search_match`), and Enter / Shift+Enter cycle the selected match; Cmd/Ctrl+F focuses the box, Esc clears it. Copy Markdown copies the rows shown; CSV exports the whole result. |
-| `src/export.rs` | `ValueKind` of a cell (numbers are right-aligned and coloured in the table). Pure result export: Markdown table (current page, to the clipboard), a failed query's error as a Markdown code block (shown in the results area instead of the table), and CSV (whole result). |
+| `src/export.rs` | `ValueKind` of a cell (coloured in the table; every cell is left-aligned). Pure result export: Markdown table (current page, to the clipboard), a failed query's error as a Markdown code block (shown in the results area instead of the table), and CSV (whole result). |
 | `src/api.rs` | Blocking Redash REST client (`ureq`). |
 | `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests); also saves variables to `variables.json`, history to `history.json` and saved queries to `saved.json` next to the config. |
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour; `queries()` returns the SQL it was sent. |
@@ -85,9 +85,17 @@ flow in `tests/ui.rs`.
   glyphs already used in the UI (`▶`, `…`), and check the snapshot.
 - Styling goes through `ui/theme.rs`: no hard-coded colours or font sizes in screens. Use
   `theme::primary_button` for a screen's main action and `theme::bar_frame` for bars.
-  Icon-only buttons are painted, not glyphs: see `theme::sidebar_toggle` (tests find it by its label).
-  Use `ui.button` (not `small_button`) so controls in a row share the 24px height.
-  Fonts are embedded from `assets/fonts/` (Inter, SIL Open Font License; keep `Inter-LICENSE.txt`).
+  Icon-only buttons are painted, not glyphs: `theme::icon_button` with a `theme::Icon`
+  (`icon_button_at` for one laid over a row: `ui.put` would take layout space and shift rows), or
+  `theme::sidebar_toggle`; tests find them by their label (e.g. "Refresh schema").
+  Buttons show the pointing hand on hover (`interact_cursor`); any other clickable widget
+  (combo box, collapsing header, painted or `Sense::click` widget) needs `theme::pointer(&response)`.
+  Sidebar list rows highlight on hover across the whole sidebar with `theme::RowHighlight`.
+  Painted widgets keep a fixed size across hover states, so nothing shifts: use `theme::tab` for
+  tabs and `theme::option` for combo box items, never `selectable_label` / `selectable_value` or
+  `frame_when_inactive(false)` (they add a border on hover, moving the text).
+  Use `ui.button` (not `small_button`) so controls in a row share the 28px height.
+  Fonts are embedded from `assets/fonts/` (Geist and Geist Mono, SIL Open Font License; keep `Geist-LICENSE.txt`).
   Check both `editor_results.png` (dark) and `editor_results_light.png` after visual changes.
 - Widgets must be findable by tests: give text inputs an accessible label with
   `.labelled_by(label.id)`; buttons are found by their text. A `ComboBox` exposes its

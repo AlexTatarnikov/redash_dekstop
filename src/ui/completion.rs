@@ -11,7 +11,12 @@ use super::theme;
 use crate::complete::{Completion, apply, complete};
 use crate::state::EditorState;
 
-const WIDTH: f32 = 320.0;
+/// The popup's width: enough for its longest suggestion, within these bounds.
+const MIN_WIDTH: f32 = 320.0;
+const MAX_WIDTH: f32 = 560.0;
+/// Space between a suggestion's name and its type, and inside the row's ends.
+const GAP: f32 = 12.0;
+const ROW_PADDING: f32 = 6.0;
 const ROW_HEIGHT: f32 = 22.0;
 const VISIBLE_ROWS: f32 = 8.0;
 
@@ -128,7 +133,7 @@ pub fn show(ui: &egui::Ui, id: egui::Id, out: &egui::text_edit::TextEditOutput, 
         .fixed_pos(pos)
         .show(ctx, |ui| {
             theme::popup_frame(ui.style()).show(ui, |ui| {
-                ui.set_width(WIDTH);
+                ui.set_width(popup_width(ui, &completion));
                 // An area's content only gets last frame's size, so ask for the height.
                 let height = ROW_HEIGHT * VISIBLE_ROWS.min(completion.items.len() as f32);
                 let scroll = egui::ScrollArea::vertical().max_height(height).min_scrolled_height(height);
@@ -163,25 +168,51 @@ fn row(ui: &mut egui::Ui, text: &str, detail: &str, selected: bool) -> egui::Res
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, text));
+    theme::pointer(&response);
     let visuals = ui.visuals();
     let radius = visuals.widgets.hovered.corner_radius;
     if selected {
         ui.painter().rect_filled(rect, radius, visuals.selection.bg_fill);
     } else if response.hovered() {
-        ui.painter().rect_filled(rect, radius, visuals.widgets.hovered.weak_bg_fill);
+        ui.painter().rect_filled(rect, radius, theme::item_hover_fill(visuals.dark_mode));
     }
-    let inner = rect.shrink2(egui::vec2(6.0, 0.0));
-    let name_font = egui::TextStyle::Monospace.resolve(ui.style());
-    let detail_font = egui::TextStyle::Small.resolve(ui.style());
-    ui.painter().text(inner.left_center(), egui::Align2::LEFT_CENTER, text, name_font, visuals.text_color());
-    ui.painter().text(
+    let inner = rect.shrink2(egui::vec2(ROW_PADDING, 0.0));
+    let (name_font, detail_font) = fonts(ui);
+    let detail = ui.painter().text(
         inner.right_center(),
         egui::Align2::RIGHT_CENTER,
         detail,
         detail_font,
         visuals.weak_text_color(),
     );
+    // Cut short with "…" before the type, for names too long even for the widest popup.
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), name_font, visuals.text_color());
+    job.wrap = egui::text::TextWrapping::truncate_at_width((detail.left() - GAP - inner.left()).max(0.0));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let pos = egui::pos2(inner.left(), rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, visuals.text_color());
     response
+}
+
+/// Fonts of a suggestion's name and of its type.
+fn fonts(ui: &egui::Ui) -> (egui::FontId, egui::FontId) {
+    (egui::TextStyle::Monospace.resolve(ui.style()), egui::TextStyle::Small.resolve(ui.style()))
+}
+
+/// Wide enough for the longest suggestion's name and type, within `MIN_WIDTH..=MAX_WIDTH`.
+fn popup_width(ui: &egui::Ui, completion: &Completion) -> f32 {
+    let (name_font, detail_font) = fonts(ui);
+    let widest = ui.fonts_mut(|f| {
+        let mut width = |text: &str, font: &egui::FontId| {
+            f.layout_no_wrap(text.to_string(), font.clone(), egui::Color32::WHITE).size().x
+        };
+        completion
+            .items
+            .iter()
+            .map(|item| width(&item.text, &name_font) + GAP + width(&item.detail, &detail_font))
+            .fold(0.0, f32::max)
+    });
+    (widest + 2.0 * ROW_PADDING).clamp(MIN_WIDTH, MAX_WIDTH)
 }
 
 /// Accepts suggestion `index`: replaces the typed part and puts the cursor after it.

@@ -100,4 +100,4 @@ the Redash API endpoints used, and project conventions.
 
 ## Third-party licenses
 
-Inter font: SIL Open Font License, see `assets/fonts/Inter-LICENSE.txt`.
+Geist and Geist Mono fonts: SIL Open Font License, see `assets/fonts/Geist-LICENSE.txt`.

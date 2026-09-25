@@ -13,16 +13,16 @@ const MAX_COL_WIDTH: f32 = 400.0;
 // Only this many rows are measured, to keep huge results cheap.
 const MEASURED_ROWS: usize = 1000;
 
-/// The search bar, then the table of the rows the search found.
-pub fn show(ui: &mut egui::Ui, view: &mut ResultView, page_size: usize) -> Option<Event> {
-    let event = search(ui, view, page_size);
+/// The table of the rows the search (in the bar under the query, see `search`) found.
+pub fn show(ui: &mut egui::Ui, view: &mut ResultView) {
     table(ui, view);
-    event
 }
 
 /// Find on the shown page, like a browser's Cmd/Ctrl + F: typing hides the page's rows
 /// without a match; Enter and Shift + Enter select the next and previous match; Esc clears the search.
-fn search(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<Event> {
+/// Laid out right to left, at the right end of the bar under the query: the box stays put
+/// while the match count comes and goes on its left.
+pub fn search(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<Event> {
     let id = egui::Id::new("results_search");
     if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
         focus_and_select_all(ui.ctx(), id, &view.search);
@@ -30,43 +30,47 @@ fn search(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<Even
     let mut text = view.search.clone();
     let hits = view.found.hits.len();
     let mut event = None;
-    ui.horizontal(|ui| {
-        let label = ui.label("Search");
-        // As tall as the buttons elsewhere, not a bare line of text.
-        let input = egui::TextEdit::singleline(&mut text)
-            .id(id)
-            .hint_text("Value to find")
-            .margin(egui::Margin::symmetric(8, 4))
-            .vertical_align(egui::Align::Center)
-            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
-            // Narrower in a narrow panel, leaving room for the match count: a row wider than
-            // the panel would widen the table's scroll area past it, so it couldn't scroll sideways.
-            .desired_width((ui.available_width() - 200.0).max(ui.available_width() / 2.0).min(240.0))
-            // Keep the focus on Enter, which selects the next match.
-            .return_key(None);
-        let tip = "Enter: next match · Shift + Enter: previous · Esc: clear";
-        let input = ui.add(input).labelled_by(label.id).on_hover_text(tip);
-        let (enter, escape, shift) = ui.input(|i| {
-            (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape), i.modifiers.shift)
-        });
-        if input.changed() {
-            event = Some(Event::SearchResults(text));
-        } else if input.has_focus() && enter && hits > 0 {
-            event = Some(Event::NextMatch(!shift));
-        } else if (input.has_focus() || input.lost_focus()) && escape && !view.search.is_empty() {
-            event = Some(Event::SearchResults(String::new()));
-        }
-
-        if !view.search.trim().is_empty() {
-            let rows = format!("{} of {} rows", view.found.rows.len(), view.page_rows(page_size).len());
-            let status = match hits {
-                0 => "No matches".to_string(),
-                n => format!("{} of {n} matches · {rows}", view.current + 1),
-            };
-            ui.add(egui::Label::new(egui::RichText::new(status).weak()).truncate());
-        }
+    let status = (!view.search.trim().is_empty()).then(|| match hits {
+        0 => "No matches".to_string(),
+        n => format!("{} of {n} matches", view.current + 1),
     });
-    ui.add_space(theme::CELL_PADDING);
+    // The box gives way first, so the label and the match count always fit.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let width = |text: &str| {
+        ui.fonts_mut(|f| f.layout_no_wrap(text.into(), font.clone(), egui::Color32::WHITE).size().x)
+    };
+    let beside = width("Search") + status.as_deref().map_or(0.0, |s| width(s) + ui.spacing().item_spacing.x);
+    let room = ui.available_width() - beside - ui.spacing().item_spacing.x;
+    // As tall as the buttons beside it, not a bare line of text.
+    let input = egui::TextEdit::singleline(&mut text)
+        .id(id)
+        .hint_text("Value to find")
+        .margin(egui::Margin::symmetric(8, 4))
+        .vertical_align(egui::Align::Center)
+        .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
+        .desired_width(room.clamp(80.0, 220.0))
+        // Keep the focus on Enter, which selects the next match.
+        .return_key(None);
+    let tip = "Enter: next match · Shift + Enter: previous · Esc: clear";
+    let input = ui.add(input).on_hover_text(tip);
+    let label = ui.label("Search");
+    let input = input.labelled_by(label.id);
+    let (enter, escape, shift) =
+        ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape), i.modifiers.shift));
+    if input.changed() {
+        event = Some(Event::SearchResults(text));
+    } else if input.has_focus() && enter && hits > 0 {
+        event = Some(Event::NextMatch(!shift));
+    } else if (input.has_focus() || input.lost_focus()) && escape && !view.search.is_empty() {
+        event = Some(Event::SearchResults(String::new()));
+    }
+
+    if let Some(status) = status {
+        // Short, to fit beside the buttons; the rows it narrowed the page to on hover.
+        let rows =
+            format!("{} of {} rows on this page", view.found.rows.len(), view.page_rows(page_size).len());
+        ui.add(egui::Label::new(egui::RichText::new(status).weak()).truncate()).on_hover_text(rows);
+    }
     event
 }
 
@@ -93,7 +97,6 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
     let r = &view.result;
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 12.0;
     let dark = ui.visuals().dark_mode;
-    let numeric: Vec<bool> = r.data.columns.iter().map(|c| is_numeric(r, &c.name)).collect();
 
     // Bring the selected match into view when it changes; otherwise start each newly
     // shown page at its top. The match's cell scrolls sideways once it is drawn.
@@ -119,27 +122,34 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
         // Where the selected match was drawn, to scroll to after the table: the table's
         // own (vertical) scroll area would swallow a horizontal scroll requested inside it.
         let mut reveal = None;
+        // Spare width is shared equally by the columns, and shared again when the panel
+        // is resized, unless the user has resized a column by hand: then theirs stay.
+        let available = ui.available_rect_before_wrap().width() - ui.spacing().scroll.allocated_width();
+        let target = spread(widths, available, ui.spacing().item_spacing.x);
+        let widths_id = egui::Id::new(("results_widths", view.id));
+        let (applied, drawn) = ui.data(|d| d.get_temp::<(Vec<f32>, Vec<f32>)>(widths_id)).unwrap_or_default();
+        let resized_by_hand = !same_widths(&applied, &drawn);
+        let respread = !applied.is_empty() && !resized_by_hand && !same_widths(&applied, &target);
+        let applied = if applied.is_empty() || respread { target } else { applied };
         let mut table = TableBuilder::new(ui)
             .id_salt(("results", view.id))
             .striped(true)
             .resizable(true)
             .auto_shrink(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        if respread {
+            table.reset();
+        }
         if let Some((row, align)) = scroll_to {
             table = table.scroll_to_row(row, Some(align));
         }
-        for (i, &w) in widths.iter().enumerate() {
-            // The last column soaks up leftover space so the table spans the full width.
-            let col = if i + 1 == widths.len() {
-                Column::remainder().at_least(w)
-            } else {
-                Column::initial(w).at_least(MIN_COL_WIDTH)
-            };
-            table = table.column(col.clip(true));
+        for &w in &applied {
+            table = table.column(Column::initial(w).at_least(MIN_COL_WIDTH).clip(true));
         }
+        let mut drawn = Vec::new();
         table
             .header(row_height, |mut header| {
-                for (c, &numeric) in r.data.columns.iter().zip(&numeric) {
+                for c in &r.data.columns {
                     header.col(|ui| {
                         // Gapless like egui_extras' stripes, so the row reads as one bar.
                         let fill = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing).round_ui();
@@ -148,13 +158,14 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
                         painter.set_clip_rect(fill.intersect(area));
                         painter.rect_filled(fill, 0.0, theme::table_header_fill(dark));
                         let name = egui::RichText::new(&c.name).font(header_font());
-                        cell(ui, numeric, |ui| {
+                        cell(ui, |ui| {
                             ui.label(name);
                         });
                     });
                 }
             })
             .body(|body| {
+                drawn = body.widths().to_vec();
                 body.rows(row_height, rows.len(), |mut row| {
                     let index = rows[row.index()];
                     let data = &r.data.rows[index];
@@ -164,7 +175,7 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
                             let kind = ValueKind::of(value);
                             let color = theme::value_color(kind, dark);
                             let (first, hits) = view.hits_in(index, column);
-                            cell(ui, kind == ValueKind::Number, |ui| {
+                            cell(ui, |ui| {
                                 if hits.is_empty() {
                                     let mut text = egui::RichText::new(cell_text(value)).color(color);
                                     if kind == ValueKind::Null {
@@ -187,6 +198,7 @@ fn table(ui: &mut egui::Ui, view: &mut ResultView) {
                     }
                 });
             });
+        ui.data_mut(|d| d.insert_temp(widths_id, (applied, drawn)));
         if let Some(rect) = reveal {
             ui.scroll_to_rect(rect, None);
         }
@@ -242,11 +254,15 @@ pub fn pager(ui: &mut egui::Ui, view: &ResultView, page_size: usize) -> Option<E
     }
 
     let mut size = page_size;
-    egui::ComboBox::from_id_salt("page_size").selected_text(format!("{size} / page")).show_ui(ui, |ui| {
-        for s in PAGE_SIZES {
-            ui.selectable_value(&mut size, s, format!("{s} / page"));
-        }
-    });
+    let sizes =
+        egui::ComboBox::from_id_salt("page_size").selected_text(format!("{size} / page")).show_ui(ui, |ui| {
+            for s in PAGE_SIZES {
+                if theme::option(ui, &format!("{s} / page"), size == s).clicked() {
+                    size = s;
+                }
+            }
+        });
+    theme::pointer(&sizes.response);
     if size != page_size {
         event = Some(Event::SetPageSize(size));
     }
@@ -280,33 +296,31 @@ pub fn error_actions(ui: &mut egui::Ui) -> Option<Event> {
     copy.clicked().then_some(Event::CopyPageMarkdown)
 }
 
-/// Draws a cell's content `CELL_PADDING` away from both of its edges (clipped text
-/// stops short of the right one), right-aligned for numbers so their digits line up.
-fn cell(ui: &mut egui::Ui, right: bool, add: impl FnOnce(&mut egui::Ui)) {
+/// Draws a cell's content left-aligned, `CELL_PADDING` away from both of its edges
+/// (clipped text stops short of the right one). Numbers too: right-aligned, they sat
+/// apart from the NULLs in their column once columns got spare width.
+fn cell(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let mut clip = ui.clip_rect();
     clip.max.x = clip.max.x.min(ui.max_rect().max.x - theme::CELL_PADDING);
     clip.min.x = clip.min.x.max(ui.max_rect().min.x + theme::CELL_PADDING);
     ui.shrink_clip_rect(clip);
-    if right {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(theme::CELL_PADDING);
-            add(ui);
-        });
-    } else {
-        ui.add_space(theme::CELL_PADDING);
-        add(ui);
-    }
+    ui.add_space(theme::CELL_PADDING);
+    add(ui);
 }
 
-/// Whether a column holds numbers, judged by its first non-null value.
-fn is_numeric(r: &QueryResult, column: &str) -> bool {
-    r.data
-        .rows
-        .iter()
-        .take(MEASURED_ROWS)
-        .map(|row| ValueKind::of(row.get(column)))
-        .find(|&k| k != ValueKind::Null)
-        == Some(ValueKind::Number)
+/// Column widths filling `available`: each fitted width plus an equal share of the
+/// space left over (none when the columns are already wider, so the table scrolls).
+fn spread(fitted: &[f32], available: f32, spacing: f32) -> Vec<f32> {
+    let used = fitted.iter().sum::<f32>() + spacing * fitted.len().saturating_sub(1) as f32;
+    // A little short of the edge, so rounding never makes the table scroll.
+    let spare = (available - used - 1.0).max(0.0);
+    let share = (spare / fitted.len().max(1) as f32).floor();
+    fitted.iter().map(|w| w + share).collect()
+}
+
+/// Whether two sets of column widths match, allowing for rounding.
+fn same_widths(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.0)
 }
 
 fn header_font() -> egui::FontId {
@@ -346,4 +360,27 @@ fn fit_column_widths(ctx: &egui::Context, r: &QueryResult) -> Vec<f32> {
             })
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spare_width_is_shared_equally() {
+        // 100 + 50 + 30 + 2 * 10 spacing = 200 used; 381 - 200 - 1 = 180 spare, 60 each.
+        assert_eq!(spread(&[100.0, 50.0, 30.0], 381.0, 10.0), [160.0, 110.0, 90.0]);
+    }
+
+    #[test]
+    fn columns_wider_than_the_panel_keep_their_widths() {
+        assert_eq!(spread(&[300.0, 300.0], 400.0, 8.0), [300.0, 300.0]);
+    }
+
+    #[test]
+    fn widths_match_within_rounding() {
+        assert!(same_widths(&[10.0, 20.0], &[10.4, 19.7]));
+        assert!(!same_widths(&[10.0, 20.0], &[10.0, 25.0]));
+        assert!(!same_widths(&[10.0], &[10.0, 20.0]));
+    }
 }

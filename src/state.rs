@@ -57,6 +57,8 @@ pub enum Event {
     RefreshSchema,
     /// Put this history entry's SQL, data source and variables back in the editor.
     RestoreHistory(usize),
+    /// Remove this entry from the history.
+    DeleteHistory(usize),
     ClearHistory,
     /// Keep the editor's query (SQL, data source and variables) in the saved queries,
     /// newest first, and start renaming it; see `saved.rs`.
@@ -528,6 +530,27 @@ pub fn has_statement(sql: &str) -> bool {
     false
 }
 
+/// The line (from 0) holding the character at `char_index` of `text`.
+pub fn line_at(text: &str, char_index: usize) -> usize {
+    text.chars().take(char_index).filter(|&c| c == '\n').count()
+}
+
+/// Puts `name` (a table or column) in `text` in place of `selection` (char indices,
+/// `start <= end`; empty for just the cursor), with a space on either side where it
+/// would otherwise run into a word. Returns the new text and the cursor, after `name`.
+pub fn insert_name(text: &str, selection: Range<usize>, name: &str) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let (start, end) = (selection.start.min(chars.len()), selection.end.min(chars.len()));
+    let word = |c: &char| c.is_alphanumeric() || *c == '_';
+    let before: String = chars[..start].iter().collect();
+    let after: String = chars[end..].iter().collect();
+    let space_before =
+        if start > 0 && (word(&chars[start - 1]) || chars[start - 1] == ')') { " " } else { "" };
+    let space_after = if chars.get(end).is_some_and(|c| word(c) || *c == '(') { " " } else { "" };
+    let cursor = start + space_before.len() + name.chars().count();
+    (format!("{before}{space_before}{name}{space_after}{after}"), cursor)
+}
+
 /// Toggles SQL line comments (`-- `) on the lines touched by `selection` (char
 /// indices, `start <= end`), like Cmd+/ in code editors: if every non-blank line is
 /// already commented they are uncommented, otherwise all are commented at their
@@ -772,6 +795,10 @@ impl AppState {
             (Screen::Editor(ed), Event::RestoreHistory(i)) if !ed.running => {
                 let Some(entry) = ed.history.get(i).cloned() else { return Vec::new() };
                 ed.restore(entry.sql, entry.data_source_id, entry.variables)
+            }
+            (Screen::Editor(ed), Event::DeleteHistory(i)) if i < ed.history.len() => {
+                ed.history.remove(i);
+                vec![Effect::SaveHistory(ed.history.clone())]
             }
             (Screen::Editor(ed), Event::ClearHistory) => {
                 ed.history.clear();
@@ -1033,6 +1060,39 @@ mod tests {
         let (mut state, _) = AppState::new(Some(config()));
         state.update(Event::DataSourcesLoaded(Ok(sources())));
         state
+    }
+
+    #[test]
+    fn inserts_a_name_at_the_cursor_or_over_the_selection() {
+        assert_eq!(insert_name("SELECT * FROM ", 14..14, "users"), ("SELECT * FROM users".into(), 19));
+        assert_eq!(
+            insert_name("SELECT * FROM t", 14..15, "users"),
+            ("SELECT * FROM users".into(), 19),
+            "replaces"
+        );
+        assert_eq!(
+            insert_name("SELECT u.", 9..9, "email"),
+            ("SELECT u.email".into(), 14),
+            "no space after a dot"
+        );
+    }
+
+    #[test]
+    fn inserted_names_do_not_run_into_words() {
+        assert_eq!(insert_name("SELECT 1", 8..8, "users"), ("SELECT 1 users".into(), 14));
+        assert_eq!(insert_name("FROMx", 4..4, "t"), ("FROM t x".into(), 6), "spaced on both sides");
+        assert_eq!(insert_name("", 0..0, "users"), ("users".into(), 5));
+        assert_eq!(insert_name("é", 5..9, "t"), ("é t".into(), 3), "clamped, counted in chars");
+    }
+
+    #[test]
+    fn line_at_counts_newlines_before_the_cursor() {
+        let sql = "SELECT 1\nFROM t\n";
+        assert_eq!(line_at(sql, 0), 0);
+        assert_eq!(line_at(sql, 8), 0, "end of the first line");
+        assert_eq!(line_at(sql, 9), 1);
+        assert_eq!(line_at(sql, 16), 2, "after the last newline");
+        assert_eq!(line_at("é\né", 2), 1, "counts characters, not bytes");
     }
 
     #[test]
@@ -1692,6 +1752,19 @@ mod tests {
         assert_eq!(editor(&state).sidebar_tab, SidebarTab::Schema);
         assert_eq!(state.update(Event::ClearHistory), [Effect::SaveHistory(vec![])]);
         assert!(editor(&state).history.is_empty());
+    }
+
+    #[test]
+    fn deletes_one_history_entry() {
+        let mut state = connected_editor();
+        let entries: Vec<Entry> = (0..3).map(|i| Entry::new(i, 1, &format!("select {i}"), &[])).collect();
+        state.update(Event::HistoryLoaded(Ok(entries)));
+        let effects = state.update(Event::DeleteHistory(1));
+        let ed = editor(&state);
+        let left: Vec<_> = ed.history.iter().map(|e| e.sql.clone()).collect();
+        assert_eq!(effects, [Effect::SaveHistory(ed.history.clone())]);
+        assert_eq!(left, ["select 0", "select 2"]);
+        assert!(state.update(Event::DeleteHistory(5)).is_empty(), "no such entry");
     }
 
     #[test]

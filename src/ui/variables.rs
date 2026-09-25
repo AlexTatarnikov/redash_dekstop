@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use super::editor;
+use super::{editor, theme};
 use crate::state::{EditorState, Event, VariableKind};
 use crate::vars::{Definition, Run, valid_name};
 
@@ -71,17 +71,18 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
                                 .iter()
                                 .find(|s| s.id == *data_source_id)
                                 .map_or_else(|| "Select data source".into(), |s| s.name.clone());
-                            egui::ComboBox::from_id_salt(("var_source", var.id))
+                            let sources = egui::ComboBox::from_id_salt(("var_source", var.id))
                                 .selected_text(selected)
                                 .width(160.0)
                                 .show_ui(ui, |ui| {
                                     for s in &ed.data_sources {
-                                        if ui.selectable_label(*data_source_id == s.id, &s.name).clicked() {
+                                        if theme::option(ui, &s.name, *data_source_id == s.id).clicked() {
                                             *data_source_id = s.id;
                                             edited = true;
                                         }
                                     }
                                 });
+                            theme::pointer(&sources.response);
                             let running = matches!(var.run, Some(Run::Running { .. }));
                             if running {
                                 ui.spinner();

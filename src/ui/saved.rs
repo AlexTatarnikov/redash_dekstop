@@ -22,6 +22,9 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
     let (saved, renaming) = (&ed.saved, &mut ed.renaming);
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         for (i, query) in saved.iter().enumerate() {
+            if i > 0 {
+                history::divider(ui);
+            }
             let e = match renaming {
                 Some(r) if r.index == i => rename_field(ui, r),
                 _ => {
@@ -40,8 +43,14 @@ pub fn show(ui: &mut egui::Ui, ed: &mut EditorState) -> Option<Event> {
 fn item(ui: &mut egui::Ui, meta: &str, query: &SavedQuery, i: usize, can_restore: bool) -> Option<Event> {
     let mut event = None;
     let title = egui::RichText::new(&query.name);
-    let response =
-        ui.add_enabled_ui(can_restore, |ui| history::row(ui, ("saved", i), title, meta, &query.sql)).inner;
+    let (response, remove) = ui
+        .add_enabled_ui(can_restore, |ui| {
+            history::row(ui, ("saved", i), title, meta, &query.sql, "Delete query")
+        })
+        .inner;
+    if remove {
+        return Some(Event::DeleteSaved(i));
+    }
     if response.clicked() {
         event = Some(Event::RestoreSaved(i));
     }
