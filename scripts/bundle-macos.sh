@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds a universal (Apple Silicon + Intel) Redash.app and packages it as a zip and a dmg
+# Builds a universal (Apple Silicon + Intel) "Redash Desktop.app" and packages it as a zip and a dmg
 # in target/dist/. Used by CI's release job; runs the same way locally.
 #
 # The app is ad-hoc signed, not notarized: on first launch macOS asks the user to allow it
@@ -7,9 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_NAME="Redash"
+APP_NAME="Redash Desktop"
+# File names of the zip and dmg (no spaces, so release asset names stay readable).
+FILE_NAME="Redash-Desktop"
 BIN="redash_desktop"
-BUNDLE_ID="io.redash.desktop"
+# Reverse-DNS of a domain we control: not redash.io, which belongs to the Redash project.
+BUNDLE_ID="io.github.alextatarnikov.redash-desktop"
 VERSION="$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
 TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
@@ -31,7 +34,7 @@ for target in "${TARGETS[@]}"; do SLICES+=("target/$target/release/$BIN"); done
 lipo -create -output "$APP/Contents/MacOS/$BIN" "${SLICES[@]}"
 cp assets/fonts/Geist-LICENSE.txt "$APP/Contents/Resources/"
 
-# Redash.icns from the committed 1024px PNG (scripts/render-icon.sh renders it from the SVG).
+# The .icns from the committed 1024px PNG (scripts/render-icon.sh renders it from the SVG).
 ICONSET="$DIST/$APP_NAME.iconset"
 mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
@@ -66,7 +69,7 @@ PLIST
 codesign --force --deep --sign - "$APP"
 codesign --verify --strict "$APP"
 
-STEM="$APP_NAME-$VERSION-macos-universal"
+STEM="$FILE_NAME-$VERSION-macos-universal"
 ditto -c -k --keepParent "$APP" "$DIST/$STEM.zip"
 
 STAGING="$DIST/dmg"

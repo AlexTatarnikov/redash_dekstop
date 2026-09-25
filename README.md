@@ -1,8 +1,9 @@
 # Redash Desktop
 
-A native desktop client for [Redash](https://redash.io), written in Rust with
+An unofficial native desktop client for [Redash](https://redash.io), written in Rust with
 [egui](https://github.com/emilk/egui). Write SQL against your Redash data sources,
-run it, and browse, copy or export the results without opening a browser.
+run it, and browse, copy or export the results without opening a browser. Not affiliated with Redash or Databricks
+(see [Trademarks](#trademarks)).
 
 ![Editor with results](tests/snapshots/editor_results.png)
 
@@ -28,7 +29,7 @@ run it, and browse, copy or export the results without opening a browser.
 
 ## Install
 
-Download `Redash.dmg` or `Redash.zip` from the
+Download `Redash-Desktop-<version>-macos-universal.dmg` (or `.zip`) from the
 [Releases](../../releases) page. It is a universal build for Apple Silicon and Intel Macs
 (macOS 11+).
 
@@ -83,7 +84,7 @@ UPDATE_SNAPSHOTS=1 cargo test
 ### Packaging (macOS)
 
 ```sh
-./scripts/bundle-macos.sh    # universal Redash.app, zip and dmg in target/dist/
+./scripts/bundle-macos.sh    # universal "Redash Desktop.app", zip and dmg in target/dist/
 ./scripts/render-icon.sh     # re-render assets/icon.png from assets/icon.svg (needs rsvg-convert)
 ```
 
@@ -97,6 +98,12 @@ The app uses a one-way data flow: the UI emits an `Event`, `AppState::update` (p
 logic, no I/O) returns `Effect`s, and the runtime performs them (HTTP, files, clipboard)
 and feeds the results back as events. See [AGENTS.md](AGENTS.md) for a file-by-file map,
 the Redash API endpoints used, and project conventions.
+
+## Trademarks
+
+This is an unofficial, community-built client. It is not affiliated with, endorsed by or
+sponsored by Redash or Databricks. "Redash" is a trademark of its respective owner and is
+used here only to describe what the app connects to.
 
 ## Third-party licenses
 

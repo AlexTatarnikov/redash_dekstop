@@ -13,7 +13,7 @@ cargo test                   # unit tests + headless UI tests + screenshot compa
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 UPDATE_SNAPSHOTS=1 cargo test   # accept intended visual changes (then review the PNG diffs)
-./scripts/bundle-macos.sh    # universal Redash.app + zip/dmg in target/dist/ (ad-hoc signed)
+./scripts/bundle-macos.sh    # universal "Redash Desktop.app" + zip/dmg in target/dist/ (ad-hoc signed)
 ./scripts/render-icon.sh     # assets/icon.svg -> assets/icon.png (needs rsvg-convert); commit both
 ```
 
@@ -55,7 +55,7 @@ Unidirectional data flow: **UI → Event → `AppState::update` → Effects → 
 | `src/config.rs` | `Config` (host + API key) and `ConfigStore` (file, or in-memory for tests); also saves variables to `variables.json`, history to `history.json` and saved queries to `saved.json` next to the config. |
 | `src/mock.rs` | In-process fake Redash used by tests and `--mock`. Its doc comment lists the canned behaviour; `queries()` returns the SQL it was sent. |
 | `src/main.rs` | Entry point; parses `--mock`; sets the window icon from `assets/icon.png`. |
-| `assets/icon.svg` | App icon source (macOS grid: 824px tile on 1024px). Rendered to the committed `assets/icon.png`, which `bundle-macos.sh` turns into `Redash.icns`. |
+| `assets/icon.svg` | App icon source (macOS grid: 824px tile on 1024px). Rendered to the committed `assets/icon.png`, which `bundle-macos.sh` turns into `Redash Desktop.icns`. |
 | `tests/ui.rs` | Headless end-to-end tests with `egui_kittest` + snapshots in `tests/snapshots/`. |
 | `.github/workflows/ci.yml` | CI on macOS: fmt, clippy, tests; then (not on PRs) `scripts/bundle-macos.sh`, uploaded as an artifact. A `v*` tag matching the `Cargo.toml` version publishes a GitHub Release. |
 
@@ -73,6 +73,13 @@ flow in `tests/ui.rs`.
 - `GET /api/data_sources/{id}/schema` returns `{schema: [{name, columns}]}` from cache, or
   `{job}` whose finished `result` is that list; `{error: {code: 1}}` means the source
   can't list its schema (treated as empty). `?refresh=true` makes Redash re-read it (Refresh button). Columns are bare names or `{name, type}`.
+
+## Naming
+
+The app is unofficial: call it **Redash Desktop** (window title, `.app`, dmg/zip), never
+plain "Redash", and describe it as a client *for* Redash. Keep the bundle ID
+`io.github.alextatarnikov.redash-desktop` (not `io.redash.*`), don't use Redash's logo,
+and keep the README's Trademarks disclaimer.
 
 ## Gotchas
 

@@ -54,7 +54,7 @@ jobs:
       - run: ./scripts/bundle-macos.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: Redash-macos-universal
+          name: Redash-Desktop-macos-universal
           path: |
             target/dist/*.zip
             target/dist/*.dmg
